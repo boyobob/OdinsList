@@ -181,6 +181,7 @@ python OdinsList.py --images /path/to/Comic_Photos --batch --resume
 | `--vlm-url` | VLM API base URL | env `VLM_BASE_URL` or `http://127.0.0.1:8000/v1` |
 | `--vlm-model` | VLM model name | env `VLM_MODEL` |
 | `--no-gcd` | Disable local GCD search | False |
+| `--no-comicvine` | Disable ComicVine API (GCD-only mode) | False |
 | `--no-visual` | Disable cover image comparison | False |
 
 Precedence: CLI flag > environment variable > default.
