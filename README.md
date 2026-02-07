@@ -1,7 +1,5 @@
 # OdinsList
 
-Automated comic book cataloging using vision language models and comic databases.
-
 OdinsList is an automated comic cataloging tool that identifies issues directly from cover images using a vision-language model, then cross-references results with the Grand Comics Database and the ComicVine API to generate structured, high-confidence collection data with minimal manual entry.
 
 ## Quick Start
