@@ -6,6 +6,7 @@ from openai import OpenAI
 from PIL import Image, ImageOps
 import argparse
 import base64
+import csv
 import glob as globmod
 import io
 import os
@@ -16,116 +17,122 @@ import re
 import time
 import random
 import sqlite3
+from dataclasses import dataclass
 from typing import Optional
 
 # ------------------------------
-# Configuration (set from CLI / environment in main())
+# Configuration
 # ------------------------------
-VLM_BASE_URL = os.environ.get("VLM_BASE_URL", "http://127.0.0.1:8000/v1")
-MODEL_NAME = os.environ.get("VLM_MODEL", "")
-client = None  # Initialized in main() after CLI parsing
+@dataclass
+class Config:
+    vlm_base_url: str = os.environ.get("VLM_BASE_URL", "http://127.0.0.1:8000/v1")
+    model_name: str = os.environ.get("VLM_MODEL", "")
+    client: object = None  # OpenAI client, initialized in main()
+    batch_mode: bool = False
+    box_name: str | None = None
+    base_dir: str | None = None
+    cover_cache_dir: str = "/tmp/comicvine_covers"
+    image_dir: str | None = None
+    outfile: str | None = None
+    logfile: str | None = None
+    log_handle: object = None
+    gcd_db_path: str | None = None
+    use_gcd: bool = True
+    comicvine_api_key: str = os.environ.get("COMICVINE_API_KEY", "")
+    comicvine_base_url: str = "https://comicvine.gamespot.com/api"
+    use_comicvine: bool = True
+    use_resume: bool = False
+    use_visual: bool = True
 
-BATCH_MODE = False
-BOX_NAME = None
-BASE_DIR = None
-COVER_CACHE_DIR = "/tmp/comicvine_covers"
-
-# These will be set dynamically based on mode
-IMAGE_DIR = None
-OUTFILE = None
-LOGFILE = None
-
-# Logging - writes to both console and file
-LOG_HANDLE = None
+cfg = Config()
 
 def log(msg: str):
     """Write message to both console and log file."""
-    global LOG_HANDLE
     print(msg)
-    if LOG_HANDLE:
-        LOG_HANDLE.write(msg + "\n")
-        LOG_HANDLE.flush()
+    if cfg.log_handle:
+        cfg.log_handle.write(msg + "\n")
+        cfg.log_handle.flush()
 
-# Grand Comics Database (local SQLite) - search here FIRST before API
-GCD_DB_PATH = None
-USE_GCD = True
+class BrowserSession:
+    """Rotating curl_cffi session with browser TLS fingerprint impersonation."""
+    IMPERSONATIONS = ["chrome120", "chrome124", "chrome131", "safari17_0", "edge101"]
+    MAX_REQUESTS = 20
 
-COMICVINE_API_KEY = os.environ.get("COMICVINE_API_KEY", "")
-COMICVINE_BASE_URL = "https://comicvine.gamespot.com/api"
-USE_COMICVINE = True
+    def __init__(self):
+        self._session = None
+        self._index = 0
+        self._request_count = 0
+        self._primed = False
 
-# Resume/Checkpoint configuration
-USE_RESUME = False
+    def get(self, url: str, **kwargs):
+        """Make a GET request, auto-rotating and priming the session as needed."""
+        self._maybe_rotate()
+        self._maybe_prime()
+        self._request_count += 1
+        return self._session.get(url, **kwargs)
 
-# Image download session - uses curl_cffi to bypass TLS fingerprinting
-IMAGE_SESSION = None
-IMAGE_SESSION_REQUEST_COUNT = 0
-IMAGE_SESSION_MAX_REQUESTS = 20  # Rotate session every N requests
+    def reset(self):
+        """Reset the session (useful if Cloudflare starts blocking)."""
+        if self._session:
+            self._session.close()
+        self._session = None
+        self._primed = False
+        self._request_count = 0
+        log("[INFO] Image download session reset")
 
-# Browser impersonation profiles for curl_cffi (uses actual browser TLS fingerprints)
-BROWSER_IMPERSONATIONS = [
-    "chrome120",
-    "chrome124",
-    "chrome131",
-    "safari17_0",
-    "edge101",
-]
-CURRENT_BROWSER_INDEX = 0
-
-def get_image_session(force_new: bool = False):
-    """Get or create a curl_cffi session with browser TLS fingerprint impersonation."""
-    global IMAGE_SESSION, CURRENT_BROWSER_INDEX, IMAGE_SESSION_REQUEST_COUNT
-
-    # Rotate session after N requests to avoid fingerprinting
-    if IMAGE_SESSION_REQUEST_COUNT >= IMAGE_SESSION_MAX_REQUESTS:
-        force_new = True
-        log(f"[INFO] Rotating session after {IMAGE_SESSION_REQUEST_COUNT} requests")
-
-    if IMAGE_SESSION is None or force_new:
-        # Rotate browser impersonation
-        impersonate = BROWSER_IMPERSONATIONS[CURRENT_BROWSER_INDEX % len(BROWSER_IMPERSONATIONS)]
-        CURRENT_BROWSER_INDEX += 1
-        IMAGE_SESSION_REQUEST_COUNT = 0
-
-        # curl_cffi session with browser impersonation (uses curl's TLS stack)
-        IMAGE_SESSION = curl_requests.Session(impersonate=impersonate)
+    def _maybe_rotate(self):
+        if self._session is not None and self._request_count < self.MAX_REQUESTS:
+            return
+        if self._request_count >= self.MAX_REQUESTS:
+            log(f"[INFO] Rotating session after {self._request_count} requests")
+        impersonate = self.IMPERSONATIONS[self._index % len(self.IMPERSONATIONS)]
+        self._index += 1
+        self._request_count = 0
+        self._session = curl_requests.Session(impersonate=impersonate)
         log(f"[INFO] Created new curl_cffi session impersonating {impersonate}")
 
-    return IMAGE_SESSION
+    def _maybe_prime(self):
+        if self._primed:
+            return
+        try:
+            response = self._session.get("https://comicvine.gamespot.com/", timeout=15)
+            if response.status_code == 200:
+                log("[INFO] Session primed successfully")
+            else:
+                log(f"[WARN] Session prime returned {response.status_code}")
+        except Exception as e:
+            log(f"[WARN] Session prime failed: {e}")
+        self._primed = True
 
-def reset_image_session():
-    """Reset the image session (useful if Cloudflare starts blocking)."""
-    global IMAGE_SESSION, _SESSION_PRIMED, IMAGE_SESSION_REQUEST_COUNT
-    if IMAGE_SESSION:
-        IMAGE_SESSION.close()
-    IMAGE_SESSION = None
-    _SESSION_PRIMED = False
-    IMAGE_SESSION_REQUEST_COUNT = 0
-    log("[INFO] Image download session reset")
+browser_session = BrowserSession()
 
 API_HEADERS = {
     "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36",
     "Accept": "application/json",
 }
 
-USER_PROMPT = """You are an expert comic-book archivist. Analyze this comic-book cover image and output a single JSON object on one line.
+VLM_FIELDS = {
+    "canonical_title": "string or null",
+    "raw_title_text": "string or null",
+    "issue_number": "string or null",
+    "cover_month_full": "string or null",
+    "cover_month": "string or null",
+    "publisher_normalized": "string or null",
+    "publisher_raw": "string or null",
+    "series_descriptor": "string or null",
+    "is_annual_or_special": "bool or null",
+    "cover_price": "string or null",
+    "country_or_region": "string or null",
+    "main_characters": "[string, ...]",
+    "story_title_text": "string or null",
+}
+
+_schema_block = json.dumps({k: v for k, v in VLM_FIELDS.items()}, indent=2)
+
+USER_PROMPT = f"""You are an expert comic-book archivist. Analyze this comic-book cover image and output a single JSON object on one line.
 
 Infer as much as you can from the cover itself. Use this exact schema:
-{
-  "canonical_title": string or null,
-  "raw_title_text": string or null,
-  "issue_number": string or null,
-  "cover_month_full": string or null,
-  "cover_month": string or null,
-  "publisher_normalized": string or null,
-  "publisher_raw": string or null,
-  "series_descriptor": string or null,
-  "is_annual_or_special": bool or null,
-  "cover_price": string or null,
-  "country_or_region": string or null,
-  "main_characters": [string, ...],
-  "story_title_text": string or null
-}
+{_schema_block}
 
 Rules:
 - If you are not sure about a value, use null.
@@ -133,11 +140,22 @@ Rules:
 - Do NOT guess any year.
 - Return ONLY raw JSON with double-quoted keys. No markdown, no explanations."""
 
+# Cover price in cents -> (earliest_year, latest_year) for standard US comics
 PRICE_YEAR_RANGES = {
-    10: (1939, 1961), 12: (1962, 1968), 15: (1969, 1971), 20: (1972, 1973),
-    25: (1974, 1975), 30: (1976, 1977), 35: (1978, 1978), 40: (1979, 1980),
-    50: (1981, 1981), 60: (1982, 1983), 75: (1984, 1985), 125: (1986, 1986),
-    150: (1987, 1987), 175: (1988, 1990),
+    10: (1939, 1961),   # $0.10
+    12: (1962, 1968),   # $0.12
+    15: (1969, 1971),   # $0.15
+    20: (1972, 1973),   # $0.20
+    25: (1974, 1975),   # $0.25
+    30: (1976, 1977),   # $0.30
+    35: (1978, 1978),   # $0.35
+    40: (1979, 1980),   # $0.40
+    50: (1981, 1981),   # $0.50
+    60: (1982, 1983),   # $0.60
+    75: (1984, 1985),   # $0.75
+    125: (1986, 1986),  # $1.25
+    150: (1987, 1987),  # $1.50
+    175: (1988, 1990),  # $1.75
 }
 
 MONTH_NUM_TO_ABBR = {
@@ -163,9 +181,27 @@ MONTH_ABBR_TO_NUM = {
 
 STOPWORDS = {"the", "and", "of", "a", "an", "is", "to", "in", "on", "for", "with", "at", "by", "from"}
 
+# Single source of truth: canonical name -> all known variants (lowercase)
+PUBLISHER_ALIASES = {
+    "Marvel":     {"marvel", "marvel comics", "marvel comics group"},
+    "DC":         {"dc", "dc comics", "d.c. comics"},
+    "Image":      {"image", "image comics"},
+    "Dark Horse": {"dark horse", "dark horse comics"},
+    "IDW":        {"idw", "idw publishing"},
+    "Valiant":    {"valiant", "valiant comics"},
+    "Archie":     {"archie", "archie comics", "archie comic publications"},
+}
+
+# Reverse lookup: any variant -> canonical name
+_PUB_TO_CANONICAL = {}
+for _canonical, _variants in PUBLISHER_ALIASES.items():
+    for _v in _variants:
+        _PUB_TO_CANONICAL[_v] = _canonical
+    _PUB_TO_CANONICAL[_canonical.lower()] = _canonical
+
 def setup_cover_cache():
     """Ensure cover cache directory exists."""
-    os.makedirs(COVER_CACHE_DIR, exist_ok=True)
+    os.makedirs(cfg.cover_cache_dir, exist_ok=True)
 
 def load_image_b64(path: str) -> str:
     img = Image.open(path)
@@ -190,7 +226,7 @@ def safe_json_loads(text: str):
         if start != -1 and end != -1 and end > start:
             try:
                 return json.loads(text[start:end+1])
-            except:
+            except json.JSONDecodeError:
                 pass
 
         # Try to fix truncated JSON (unclosed arrays/strings)
@@ -209,7 +245,7 @@ def safe_json_loads(text: str):
                 if json_str.count('{') > json_str.count('}'):
                     json_str += '}'
                 return json.loads(json_str)
-        except:
+        except (json.JSONDecodeError, ValueError):
             pass
     return None
 
@@ -222,16 +258,16 @@ def parse_price_to_cents(price: str) -> Optional[int]:
     if s.endswith(("¢", "c", "C")):
         try:
             return int(round(float(s[:-1])))
-        except:
+        except (ValueError, TypeError):
             return None
     if s.startswith("$"):
         try:
             return int(round(float(s[1:]) * 100))
-        except:
+        except (ValueError, TypeError):
             return None
     try:
         return int(round(float(s) * 100)) if "." in s else (int(s) if int(s) <= 300 else None)
-    except:
+    except (ValueError, TypeError):
         return None
 
 def get_year_likelihood_from_price(cover_price: str, is_annual: bool) -> dict:
@@ -250,7 +286,14 @@ def get_year_likelihood_from_price(cover_price: str, is_annual: bool) -> dict:
             year_scores[year] = 1.0
         else:
             distance = min(abs(year - base_start), abs(year - base_end))
-            year_scores[year] = 0.7 if distance <= 2 else (0.4 if distance <= 5 else (0.2 if distance <= 10 else 0.0))
+            if distance <= 2:
+                year_scores[year] = 0.7
+            elif distance <= 5:
+                year_scores[year] = 0.4
+            elif distance <= 10:
+                year_scores[year] = 0.2
+            else:
+                year_scores[year] = 0.0
     return year_scores
 
 def normalize_issue_number(issue_num: str) -> str:
@@ -306,7 +349,7 @@ def normalize_issue_number(issue_num: str) -> str:
     try:
         num = float(issue_num)
         return str(int(num)) if num == int(num) else str(num)
-    except:
+    except (ValueError, TypeError):
         # If can't convert directly, try to extract first number
         match = re.search(r'(\d+\.?\d*)', issue_num)
         if match:
@@ -314,7 +357,7 @@ def normalize_issue_number(issue_num: str) -> str:
             try:
                 num = float(num_str)
                 return str(int(num)) if num == int(num) else str(num)
-            except:
+            except (ValueError, TypeError):
                 return num_str
         # If all else fails, return original (stripped)
         return original.strip()
@@ -323,20 +366,7 @@ def normalize_publisher(publisher: str) -> str:
     """Normalize common publisher name variants to canonical short forms."""
     if not publisher:
         return ""
-    pub_lower = publisher.strip().lower()
-    aliases = {
-        "Marvel": ["marvel", "marvel comics", "marvel comics group"],
-        "DC": ["dc", "dc comics", "d.c. comics"],
-        "Image": ["image", "image comics"],
-        "Dark Horse": ["dark horse", "dark horse comics"],
-        "IDW": ["idw", "idw publishing"],
-        "Valiant": ["valiant", "valiant comics"],
-        "Archie": ["archie", "archie comics", "archie comic publications"],
-    }
-    for canonical, variants in aliases.items():
-        if pub_lower in variants:
-            return canonical
-    return publisher.strip()
+    return _PUB_TO_CANONICAL.get(publisher.strip().lower(), publisher.strip())
 
 
 def finalize_row(title, issue_num, cover_month, publisher, year):
@@ -408,18 +438,11 @@ def _get_publisher_variants(publisher: str) -> list:
     if not publisher:
         return []
 
-    pub_lower = publisher.lower().strip()
-    pub_variants = [publisher]
-
-    # Add common aliases for exact matching
-    if pub_lower in ["marvel", "marvel comics", "marvel comics group"]:
-        pub_variants = ["Marvel", "Marvel Comics", "Marvel Comics Group"]
-    elif pub_lower in ["dc", "dc comics"]:
-        pub_variants = ["DC", "DC Comics", "D.C. Comics"]
-    elif pub_lower in ["image", "image comics"]:
-        pub_variants = ["Image", "Image Comics"]
-
-    return pub_variants
+    canonical = normalize_publisher(publisher)
+    if canonical in PUBLISHER_ALIASES:
+        # Return capitalized forms of all variants for case-insensitive SQL matching
+        return [canonical] + [v.title() if v != v.upper() else v for v in PUBLISHER_ALIASES[canonical]]
+    return [publisher]
 
 def _score_and_filter_by_title(results: dict, series_title: str, threshold: float = 0.4, log_label: str = "") -> dict:
     """
@@ -465,6 +488,35 @@ def _score_and_filter_by_title(results: dict, series_title: str, threshold: floa
         log(f"[GCD] No candidates passed title filter{log_label} (>= {threshold}), rejecting all")
         return {}
 
+def _build_gcd_filters(issue_num, publisher, year_range, cover_month=None):
+    """Build WHERE clause parts and params for GCD search."""
+    parts, params = [], []
+
+    if issue_num:
+        normalized = normalize_issue_number(issue_num)
+        parts.append("(i.number = ? OR i.number = ?)")
+        params.extend([issue_num, normalized])
+
+    if publisher:
+        pub_variants = _get_publisher_variants(publisher)
+        if pub_variants:
+            pub_conditions = " OR ".join(["LOWER(p.name) = LOWER(?)" for _ in pub_variants])
+            parts.append(f"({pub_conditions})")
+            params.extend(pub_variants)
+
+    if year_range:
+        min_year, max_year = year_range
+        parts.append("(s.year_began <= ? AND (s.year_ended IS NULL OR s.year_ended >= ?))")
+        params.extend([max_year, min_year])
+
+    if cover_month:
+        month_num = MONTH_ABBR_TO_NUM.get(cover_month.upper()[:3])
+        if month_num:
+            parts.append("substr(i.key_date, 6, 2) = ?")
+            params.append(month_num)
+
+    return parts, params
+
 def search_gcd(series_title: str, issue_num: str, publisher: str, year_range: tuple = None, cover_month: str = None) -> list:
     """
     Search the local Grand Comics Database (SQLite) for matching issues.
@@ -478,19 +530,15 @@ def search_gcd(series_title: str, issue_num: str, publisher: str, year_range: tu
        - Avoids missing matches due to title variations
        - "Sgt. Fury" vs "Sgt. Fury and His Howling Commandos"
     """
-    if not USE_GCD or not os.path.exists(GCD_DB_PATH):
+    if not cfg.use_gcd or not os.path.exists(cfg.gcd_db_path):
         return []
 
     try:
-        conn = sqlite3.connect(GCD_DB_PATH)
+        conn = sqlite3.connect(cfg.gcd_db_path)
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
 
         all_results = {}
-
-        # Build query with PRIMARY FILTERS (no title filter!)
-        query_parts = []
-        params = []
 
         base_query = """
         SELECT
@@ -513,44 +561,17 @@ def search_gcd(series_title: str, issue_num: str, publisher: str, year_range: tu
         WHERE i.deleted = 0 AND s.deleted = 0 AND p.deleted = 0
         """
 
-        # PRIMARY FILTER 1: Issue number (exact match - required)
-        if issue_num:
-            normalized = normalize_issue_number(issue_num)
-            query_parts.append("(i.number = ? OR i.number = ?)")
-            params.extend([issue_num, normalized])
-        else:
-            # Can't search without issue number
+        if not issue_num:
             conn.close()
             return []
 
-        # PRIMARY FILTER 2: Publisher (exact match, case-insensitive)
-        if publisher:
-            pub_variants = _get_publisher_variants(publisher)
-            if pub_variants:
-                pub_conditions = " OR ".join(["LOWER(p.name) = LOWER(?)" for _ in pub_variants])
-                query_parts.append(f"({pub_conditions})")
-                params.extend(pub_variants)
+        # First attempt: with month filter
+        query_parts, params = _build_gcd_filters(issue_num, publisher, year_range, cover_month)
 
-        # PRIMARY FILTER 3: Year range (from price likelihood)
-        if year_range:
-            min_year, max_year = year_range
-            query_parts.append("(s.year_began <= ? AND (s.year_ended IS NULL OR s.year_ended >= ?))")
-            params.extend([max_year, min_year])
-
-        # PRIMARY FILTER 4: Month (exact match)
-        if cover_month:
-            month_num = MONTH_ABBR_TO_NUM.get(cover_month.upper()[:3])
-            if month_num:
-                query_parts.append("substr(i.key_date, 6, 2) = ?")
-                params.append(month_num)
-
-        # Combine filters and execute
         if query_parts:
-            full_query = base_query + " AND " + " AND ".join(query_parts)
+            full_query = base_query + " AND " + " AND ".join(query_parts) + " LIMIT 100"
         else:
-            full_query = base_query
-
-        full_query += " LIMIT 100"  # Get more candidates, we'll rank by title
+            full_query = base_query + " LIMIT 100"
 
         cursor.execute(full_query, params)
         for row in cursor.fetchall():
@@ -561,33 +582,14 @@ def search_gcd(series_title: str, issue_num: str, publisher: str, year_range: tu
         # SCORING & FILTERING: Calculate title similarity and filter poor matches
         all_results = _score_and_filter_by_title(all_results, series_title)
 
-        # If no results with primary filters, try without month constraint
+        # Fallback: without month constraint
         if len(all_results) == 0 and cover_month:
             log(f"[GCD] No matches with month filter, trying without month...")
-            # Rebuild query without month
-            query_parts_no_month = []
-            params_no_month = []
+            query_parts, params = _build_gcd_filters(issue_num, publisher, year_range)
 
-            if issue_num:
-                normalized = normalize_issue_number(issue_num)
-                query_parts_no_month.append("(i.number = ? OR i.number = ?)")
-                params_no_month.extend([issue_num, normalized])
-
-            if publisher:
-                pub_variants = _get_publisher_variants(publisher)
-                if pub_variants:
-                    pub_conditions = " OR ".join(["LOWER(p.name) = LOWER(?)" for _ in pub_variants])
-                    query_parts_no_month.append(f"({pub_conditions})")
-                    params_no_month.extend(pub_variants)
-
-            if year_range:
-                min_year, max_year = year_range
-                query_parts_no_month.append("(s.year_began <= ? AND (s.year_ended IS NULL OR s.year_ended >= ?))")
-                params_no_month.extend([max_year, min_year])
-
-            if query_parts_no_month:
-                full_query = base_query + " AND " + " AND ".join(query_parts_no_month) + " LIMIT 100"
-                cursor.execute(full_query, params_no_month)
+            if query_parts:
+                full_query = base_query + " AND " + " AND ".join(query_parts) + " LIMIT 100"
+                cursor.execute(full_query, params)
 
                 for row in cursor.fetchall():
                     issue_id = row['issue_id']
@@ -611,7 +613,7 @@ def search_gcd(series_title: str, issue_num: str, publisher: str, year_range: tu
         return sorted(all_results.values(), key=lambda x: x.get('title_similarity', 0), reverse=True)
 
     except Exception as e:
-        print(f"[GCD ERROR] {e}")
+        log(f"[GCD ERROR] {e}")
         import traceback
         traceback.print_exc()
         return []
@@ -678,7 +680,7 @@ def month_similarity_score(q_month: str, cv_month: str) -> float:
         diff = abs(q_idx - cv_idx)
         diff = min(diff, 12 - diff)  # Handle wrap-around (Dec-Jan)
         return {0: 1.0, 1: 0.7, 2: 0.4}.get(diff, 0.0)
-    except:
+    except (ValueError, TypeError):
         return 0.0
 
 def download_cover(url: str, output_path: str, max_retries: int = 3) -> bool:
@@ -686,26 +688,19 @@ def download_cover(url: str, output_path: str, max_retries: int = 3) -> bool:
 
     On any HTTP error, resets session and retries up to max_retries times.
     """
-    global IMAGE_SESSION_REQUEST_COUNT
-
     for attempt in range(max_retries):
-        # Prime session on first download
-        prime_image_session()
-
         # Random delay between requests to appear more human (0.5-1.5 seconds)
         delay = random.uniform(0.5, 1.5)
         time.sleep(delay)
 
         try:
-            session = get_image_session()
-            IMAGE_SESSION_REQUEST_COUNT += 1
-            response = session.get(url, timeout=15)
+            response = browser_session.get(url, timeout=15)
 
             if response.status_code >= 400:
                 log(f"[DOWNLOAD] HTTP {response.status_code} (attempt {attempt + 1}/{max_retries})")
                 if attempt < max_retries - 1:
                     log(f"[DOWNLOAD] Resetting session and retrying...")
-                    reset_image_session()
+                    browser_session.reset()
                     time.sleep(2)  # Brief cooldown before retry
                     continue
                 else:
@@ -737,7 +732,7 @@ def download_cover(url: str, output_path: str, max_retries: int = 3) -> bool:
             if os.path.exists(output_path):
                 os.remove(output_path)
             if attempt < max_retries - 1:
-                reset_image_session()
+                browser_session.reset()
                 time.sleep(2)
                 continue
             return False
@@ -745,33 +740,12 @@ def download_cover(url: str, output_path: str, max_retries: int = 3) -> bool:
     return False
 
 
-# Track whether session has been primed
-_SESSION_PRIMED = False
-
-def prime_image_session():
-    """Prime curl_cffi session by visiting homepage to establish cookies."""
-    global _SESSION_PRIMED
-    if _SESSION_PRIMED:
-        return
-    try:
-        session = get_image_session()
-        response = session.get("https://comicvine.gamespot.com/", timeout=15)
-        if response.status_code == 200:
-            log("[INFO] Session primed successfully")
-        else:
-            log(f"[WARN] Session prime returned {response.status_code}")
-        _SESSION_PRIMED = True
-    except Exception as e:
-        log(f"[WARN] Session prime failed: {e}")
-        _SESSION_PRIMED = True  # Continue anyway
-
-
 def get_cached_cover(issue_id: int, image_data: dict) -> Optional[str]:
     """Download and cache a cover image from ComicVine, return local path."""
     if not image_data or not issue_id:
         return None
 
-    cache_path = os.path.join(COVER_CACHE_DIR, f"{issue_id}.jpg")
+    cache_path = os.path.join(cfg.cover_cache_dir, f"{issue_id}.jpg")
 
     # Return cached if exists
     if os.path.exists(cache_path):
@@ -807,8 +781,8 @@ Ignore: differences in image quality, slight color variations, wear and tear, or
 
 Your answer (one word only):"""
 
-        resp = client.chat.completions.create(
-            model=MODEL_NAME,
+        resp = cfg.client.chat.completions.create(
+            model=cfg.model_name,
             messages=[{
                 "role": "user",
                 "content": [
@@ -832,7 +806,7 @@ Your answer (one word only):"""
             return "DIFFERENT"
 
     except Exception as e:
-        print(f"[WARN] Visual comparison failed: {e}")
+        log(f"[WARN] Visual comparison failed: {e}")
         return "DIFFERENT"
 
 def _try_visual_match(candidate_detail: dict, original_img_path: str, current_score: float) -> tuple:
@@ -845,31 +819,30 @@ def _try_visual_match(candidate_detail: dict, original_img_path: str, current_sc
         - adjusted_score: score with visual bonus applied
         - visual_result: "SAME", "VARIANT", "DIFFERENT", or None if no comparison done
     """
+    if not cfg.use_visual:
+        return False, current_score, None
+
     # Get candidate info for logging
     vol_name = candidate_detail.get('volume', {}).get('name', 'Unknown')
     issue_no = candidate_detail.get('issue_number', '?')
 
     if not original_img_path:
-        print(f"  [VISUAL] Skipping {vol_name} #{issue_no}: no original image path")
         log(f"[VISUAL] Skipping {vol_name} #{issue_no}: no original image path")
         return False, current_score, None
 
     issue_id = candidate_detail.get("id")
     image_data = candidate_detail.get("image")
     if not image_data:
-        print(f"  [VISUAL] Skipping {vol_name} #{issue_no}: no cover image data from ComicVine")
         log(f"[VISUAL] Skipping {vol_name} #{issue_no}: no cover image data from ComicVine")
         return False, current_score, None
 
     cover_path = get_cached_cover(issue_id, image_data)
     if not cover_path:
-        print(f"  [VISUAL] Skipping {vol_name} #{issue_no}: failed to download cover")
         log(f"[VISUAL] Skipping {vol_name} #{issue_no}: failed to download cover")
         return False, current_score, None
 
     # Log that visual comparison is starting
-    print(f"  [VISUAL] Comparing covers: {vol_name} #{issue_no}...")
-    log(f"[VISUAL] Comparing covers: {vol_name} #{issue_no}")
+    log(f"[VISUAL] Comparing covers: {vol_name} #{issue_no}...")
 
     visual_result = compare_covers_with_qwen(original_img_path, cover_path)
 
@@ -882,7 +855,7 @@ def _try_visual_match(candidate_detail: dict, original_img_path: str, current_sc
 
 def comicvine_get(path: str, params: dict, max_retries: int = 5):
     """Make a request to ComicVine API with retry logic for rate limiting and network errors."""
-    url = f"{COMICVINE_BASE_URL}/{path.lstrip('/')}"
+    url = f"{cfg.comicvine_base_url}/{path.lstrip('/')}"
 
     for attempt in range(max_retries):
         try:
@@ -893,19 +866,19 @@ def comicvine_get(path: str, params: dict, max_retries: int = 5):
 
             # Handle specific status codes
             if resp.status_code == 403:
-                print("[ERROR] ComicVine 403 - Access forbidden")
+                log("[ERROR] ComicVine 403 - Access forbidden")
                 return None
 
             if resp.status_code == 420:
                 # Rate limiting - wait longer before retry
                 wait_time = min(2 ** attempt * 3, 90)  # Aggressive backoff, max 90s
-                print(f"[WARN] Rate limited (420). Waiting {wait_time}s before retry {attempt + 1}/{max_retries}...")
+                log(f"[WARN] Rate limited (420). Waiting {wait_time}s before retry {attempt + 1}/{max_retries}...")
                 time.sleep(wait_time)
 
                 # If we've hit rate limits multiple times, add extra cooldown
                 if attempt >= 2:
                     extra_cooldown = 10
-                    print(f"[INFO] Adding {extra_cooldown}s cooldown after repeated rate limiting...")
+                    log(f"[INFO] Adding {extra_cooldown}s cooldown after repeated rate limiting...")
                     time.sleep(extra_cooldown)
                 continue
 
@@ -917,38 +890,38 @@ def comicvine_get(path: str, params: dict, max_retries: int = 5):
 
         except requests.exceptions.Timeout:
             wait_time = min(2 ** attempt, 30)
-            print(f"[WARN] Request timeout. Waiting {wait_time}s before retry {attempt + 1}/{max_retries}...")
+            log(f"[WARN] Request timeout. Waiting {wait_time}s before retry {attempt + 1}/{max_retries}...")
             time.sleep(wait_time)
             if attempt == max_retries - 1:
-                print("[ERROR] Max retries reached after timeout")
+                log("[ERROR] Max retries reached after timeout")
                 return None
 
         except requests.exceptions.ConnectionError as e:
             wait_time = min(2 ** attempt, 30)
-            print(f"[WARN] Connection error: {e}. Waiting {wait_time}s before retry {attempt + 1}/{max_retries}...")
+            log(f"[WARN] Connection error: {e}. Waiting {wait_time}s before retry {attempt + 1}/{max_retries}...")
             time.sleep(wait_time)
             if attempt == max_retries - 1:
-                print("[ERROR] Max retries reached after connection error")
+                log("[ERROR] Max retries reached after connection error")
                 return None
 
         except requests.exceptions.HTTPError as e:
             # For other HTTP errors that aren't 403 or 420
             if attempt < max_retries - 1:
                 wait_time = min(2 ** attempt, 30)
-                print(f"[WARN] HTTP error {e}. Waiting {wait_time}s before retry {attempt + 1}/{max_retries}...")
+                log(f"[WARN] HTTP error {e}. Waiting {wait_time}s before retry {attempt + 1}/{max_retries}...")
                 time.sleep(wait_time)
             else:
-                print(f"[ERROR] HTTP error after {max_retries} retries: {e}")
+                log(f"[ERROR] HTTP error after {max_retries} retries: {e}")
                 return None  # Don't crash, just skip this API call
 
         except Exception as e:
-            print(f"[ERROR] Unexpected error in API call: {type(e).__name__}: {e}")
+            log(f"[ERROR] Unexpected error in API call: {type(e).__name__}: {e}")
             if attempt < max_retries - 1:
                 wait_time = min(2 ** attempt, 30)
-                print(f"[WARN] Waiting {wait_time}s before retry {attempt + 1}/{max_retries}...")
+                log(f"[WARN] Waiting {wait_time}s before retry {attempt + 1}/{max_retries}...")
                 time.sleep(wait_time)
             else:
-                print(f"[ERROR] Max retries reached, skipping this API call")
+                log(f"[ERROR] Max retries reached, skipping this API call")
                 return None  # Don't crash, just skip
 
     return None
@@ -1013,17 +986,11 @@ def generate_title_variants(series_title: str) -> list:
     else:
         variants.append(f"The {series_title}")
 
-    # Remove "Mighty" prefix (common for Thor)
-    if "Mighty" in series_title:
-        variants.append(series_title.replace("The Mighty ", "").replace("Mighty ", ""))
-
-    # Remove "Invincible" prefix (common for Iron Man)
-    if "Invincible" in series_title:
-        variants.append(series_title.replace("The Invincible ", "").replace("Invincible ", ""))
-
-    # Remove "Uncanny" prefix (common for X-Men)
-    if "Uncanny" in series_title:
-        variants.append(series_title.replace("The Uncanny ", "").replace("Uncanny ", ""))
+    # Drop common adjective prefixes: "The Mighty Thor" -> "Thor"
+    _DROPPABLE_ADJECTIVES = ["Mighty", "Invincible", "Uncanny", "Amazing", "Spectacular", "Incredible"]
+    for adj in _DROPPABLE_ADJECTIVES:
+        if adj in series_title:
+            variants.append(series_title.replace(f"The {adj} ", "").replace(f"{adj} ", ""))
 
     # Remove character name prefix before comma
     # "Luke Cage, Hero for Hire" → "Hero for Hire"
@@ -1101,22 +1068,64 @@ def publisher_matches(q_pub: str, cv_pub: str) -> bool:
     """Check if publisher names match."""
     if not q_pub or not cv_pub:
         return False
-    q, c = q_pub.lower(), cv_pub.lower()
+    q, c = q_pub.lower().strip(), cv_pub.lower().strip()
     if q in c or c in q:
         return True
-    aliases = {
-        "marvel": ["marvel comics", "marvel comics group"],
-        "dc": ["dc comics"],
-        "image": ["image comics"]
-    }
-    for key, vals in aliases.items():
-        if (q == key or q in vals) and (c == key or c in vals):
-            return True
-    return False
+    return normalize_publisher(q) == normalize_publisher(c)
 
 # ------------------------------
 # Search Functions
 # ------------------------------
+def _filter_issue_candidates(
+    issues: list,
+    issue_num: str,
+    title_variants: list,
+    publisher: str,
+    title_threshold: float = 0.5,
+    month_num: str | None = None,
+) -> dict:
+    """Filter ComicVine issue results by number, title, publisher, and optionally month."""
+    normalized_issue = normalize_issue_number(issue_num)
+    candidates = {}
+
+    for issue in issues:
+        vol = issue.get("volume", {})
+        vol_name = vol.get("name", "")
+        issue_no = str(issue.get("issue_number", "")).strip()
+
+        if issue_num and issue_no not in [issue_num, normalized_issue]:
+            continue
+
+        if title_variants:
+            if ":" in vol_name and vol_name not in title_variants:
+                continue
+            if not any(title_matches(vol_name, tv, threshold=title_threshold) for tv in title_variants):
+                continue
+
+        if publisher:
+            pub_name = (vol.get("publisher") or {}).get("name", "")
+            if pub_name and not publisher_matches(publisher, pub_name):
+                continue
+
+        if month_num:
+            cover_date = issue.get("cover_date", "")
+            if cover_date:
+                parts = cover_date.split("-")
+                if len(parts) >= 2:
+                    issue_month = parts[1]
+                    if issue_month != month_num:
+                        try:
+                            if abs(int(issue_month) - int(month_num)) > 1:
+                                continue
+                        except ValueError:
+                            continue
+
+        issue_id = issue.get("id")
+        if issue_id and issue_id not in candidates:
+            candidates[issue_id] = issue
+
+    return candidates
+
 def search_issues_by_number_and_month(issue_num: str, month_abbr: str, year_likelihood: dict,
                                        series_title: str = None, publisher: str = None) -> list:
     """
@@ -1144,14 +1153,13 @@ def search_issues_by_number_and_month(issue_num: str, month_abbr: str, year_like
     log(f"[Strategy 2] Search API: '{series_title}' #{issue_num} {month_abbr}")
 
     candidates = {}
-    normalized_issue = normalize_issue_number(issue_num)
     month_num = MONTH_ABBR_TO_NUM.get(month_abbr.upper()) if month_abbr else None
     title_variants = generate_title_variants(series_title) if series_title else []
 
     # Use /search endpoint - ONE simple call
     for query in search_queries:
         params = {
-            "api_key": COMICVINE_API_KEY,
+            "api_key": cfg.comicvine_api_key,
             "format": "json",
             "query": query,
             "resources": "issue",  # Only search issues
@@ -1159,64 +1167,30 @@ def search_issues_by_number_and_month(issue_num: str, month_abbr: str, year_like
             "field_list": "id,volume,issue_number,cover_date,api_detail_url,name,deck,image",
         }
 
-        print(f"  Searching: \"{query}\"")
+        log(f"  Searching: \"{query}\"")
         data = comicvine_get("search/", params)
         if not data or data.get("error") != "OK":
             continue
 
         results = data.get("results", [])
         if not results:
-            print(f"    No results")
+            log(f"    No results")
             continue
 
-        print(f"    Found {len(results)} results")
+        log(f"    Found {len(results)} results")
 
-        # Filter results locally
-        for issue in results:
-            vol = issue.get("volume", {})
-            vol_name = vol.get("name", "")
-            issue_no = str(issue.get("issue_number", "")).strip()
-            cover_date = issue.get("cover_date", "")
-
-            # 1. Check issue number matches (exact or normalized)
-            if issue_no not in [issue_num, normalized_issue]:
-                continue
-
-            # 2. Filter by title if provided
-            if series_title:
-                # Exclude one-shots with ":" in name
-                if ":" in vol_name and vol_name != series_title:
-                    continue
-
-                # Check if title matches - use stricter threshold (0.75) for /search
-                # since it returns very broad results
-                if not any(title_matches(vol_name, tv, threshold=0.75) for tv in title_variants):
-                    continue
-
-            # 3. Filter by publisher if provided
-            if publisher:
-                pub_name = (vol.get("publisher") or {}).get("name", "")
-                if pub_name and not publisher_matches(publisher, pub_name):
-                    continue
-
-            # 4. Filter by month if provided
-            if month_num and cover_date:
-                parts = cover_date.split("-")
-                if len(parts) >= 2:
-                    issue_month = parts[1]
-                    # Allow exact match or ±1 month
-                    if issue_month != month_num:
-                        try:
-                            if abs(int(issue_month) - int(month_num)) > 1:
-                                continue
-                        except:
-                            continue
-
-            # Add to candidates
-            issue_id = issue.get("id")
-            if issue_id and issue_id not in candidates:
+        # Use stricter threshold (0.75) for /search since it returns very broad results
+        filtered = _filter_issue_candidates(
+            results, issue_num, title_variants, publisher,
+            title_threshold=0.75, month_num=month_num,
+        )
+        for issue_id, issue in filtered.items():
+            if issue_id not in candidates:
                 candidates[issue_id] = issue
-                print(f"      ✓ {vol_name} #{issue_no} ({cover_date})")
+                vol_name = issue.get("volume", {}).get("name", "")
+                issue_no = str(issue.get("issue_number", "")).strip()
+                cover_date = issue.get("cover_date", "")
+                log(f"      ✓ {vol_name} #{issue_no} ({cover_date})")
 
         # If we found good matches, no need to try other queries
         if len(candidates) >= 3:
@@ -1237,7 +1211,7 @@ def search_issues_directly(series_title: str, issue_num: str, publisher: str) ->
     # Search by issue number
     for attempt_num in [issue_num, normalized_issue]:
         params = {
-            "api_key": COMICVINE_API_KEY,
+            "api_key": cfg.comicvine_api_key,
             "format": "json",
             "filter": f"issue_number:{attempt_num}",
             "limit": 100,
@@ -1248,25 +1222,10 @@ def search_issues_directly(series_title: str, issue_num: str, publisher: str) ->
         if not data or data.get("error") != "OK":
             continue
 
-        # Post-filter by title and publisher
-        for issue in data.get("results", []):
-            vol = issue.get("volume", {})
-            vol_name = vol.get("name", "")
-
-            # Check title match
-            if series_title:
-                if not any(title_matches(vol_name, tv) for tv in title_variants):
-                    continue
-
-            # Check publisher
-            if publisher:
-                pub_name = (vol.get("publisher") or {}).get("name", "")
-                if pub_name and not publisher_matches(publisher, pub_name):
-                    continue
-
-            issue_id = issue.get("id")
-            if issue_id and issue_id not in candidates:
-                candidates[issue_id] = issue
+        filtered = _filter_issue_candidates(
+            data.get("results", []), issue_num, title_variants, publisher,
+        )
+        candidates.update(filtered)
 
     return list(candidates.values())
 
@@ -1286,7 +1245,7 @@ def fetch_volume_candidates(series_title: str, publisher: str) -> list:
                 filter_parts.append(f"publisher:{publisher}")
 
             params = {
-                "api_key": COMICVINE_API_KEY,
+                "api_key": cfg.comicvine_api_key,
                 "format": "json",
                 "filter": ",".join(filter_parts),
                 "limit": 20,
@@ -1321,7 +1280,7 @@ def fetch_issue_candidates_for_volume(volume_id: int, issue_num: str) -> list:
         # Try exact match
         for attempt_num in [issue_num, normalized]:
             params = {
-                "api_key": COMICVINE_API_KEY,
+                "api_key": cfg.comicvine_api_key,
                 "format": "json",
                 "filter": f"volume:{volume_id},issue_number:{attempt_num}",
                 "limit": 10,
@@ -1332,7 +1291,7 @@ def fetch_issue_candidates_for_volume(volume_id: int, issue_num: str) -> list:
             if data and data.get("error") == "OK":
                 results = data.get("results", [])
                 if results:
-                    print(f"    Found {len(results)} issues for #{attempt_num} in this volume")
+                    log(f"    Found {len(results)} issues for #{attempt_num} in this volume")
                 for issue in results:
                     iid = issue.get("id")
                     if iid:
@@ -1340,11 +1299,11 @@ def fetch_issue_candidates_for_volume(volume_id: int, issue_num: str) -> list:
 
         # If no exact match found, this volume doesn't have the issue
         if not candidates:
-            print(f"    No match for #{issue_num} in this volume")
+            log(f"    No match for #{issue_num} in this volume")
     else:
         # No issue number - get all issues (fallback)
         params = {
-            "api_key": COMICVINE_API_KEY,
+            "api_key": cfg.comicvine_api_key,
             "format": "json",
             "filter": f"volume:{volume_id}",
             "limit": 100,
@@ -1365,23 +1324,30 @@ def fetch_issue_details(api_detail_url: str) -> Optional[dict]:
         return None
     try:
         params = {
-            "api_key": COMICVINE_API_KEY,
+            "api_key": cfg.comicvine_api_key,
             "format": "json",
             "field_list": "id,volume,issue_number,cover_date,description,character_credits,name,deck,image",
         }
-        rel_path = api_detail_url.replace(COMICVINE_BASE_URL + "/", "")
+        rel_path = api_detail_url.replace(cfg.comicvine_base_url + "/", "")
         data = comicvine_get(rel_path, params)
         return data.get("results") if data and data.get("error") == "OK" else None
-    except:
+    except (requests.exceptions.RequestException, KeyError, AttributeError):
         return None
 
 # ------------------------------
 # Scoring Functions
 # ------------------------------
-def enhanced_candidate_scoring(detail_data: dict, q_issue_num: str, q_publisher: str,
-                               year_likelihood: dict, q_month_abbr: str,
-                               story_tokens: set, q_characters_norm: set,
-                               q_series_title: str = None) -> float:
+@dataclass(frozen=True)
+class QueryContext:
+    issue_num: str
+    publisher: str
+    year_likelihood: dict
+    month_abbr: str
+    story_tokens: set
+    characters_norm: set
+    series_title: str
+
+def enhanced_candidate_scoring(detail_data: dict, query: QueryContext) -> float:
     """
     Score a candidate issue using all available signals.
 
@@ -1398,8 +1364,8 @@ def enhanced_candidate_scoring(detail_data: dict, q_issue_num: str, q_publisher:
 
     # === HARD CONSTRAINT: Issue number ===
     issue_num_api = str(detail_data.get("issue_number", "")).strip()
-    if q_issue_num:
-        q_norm = normalize_issue_number(q_issue_num)
+    if query.issue_num:
+        q_norm = normalize_issue_number(query.issue_num)
         cv_norm = normalize_issue_number(issue_num_api)
 
         if cv_norm != q_norm:
@@ -1409,7 +1375,7 @@ def enhanced_candidate_scoring(detail_data: dict, q_issue_num: str, q_publisher:
                     score -= 8  # Heavy penalty for nearby issue
                 else:
                     return -1e9  # Hard reject
-            except:
+            except (ValueError, TypeError):
                 return -1e9
         else:
             score += 15  # Strong boost for exact match
@@ -1419,26 +1385,24 @@ def enhanced_candidate_scoring(detail_data: dict, q_issue_num: str, q_publisher:
     # Publisher (+5)
     vol = detail_data.get("volume", {})
     pub_name = (vol.get("publisher") or {}).get("name", "")
-    if q_publisher and publisher_matches(q_publisher, pub_name):
+    if query.publisher and publisher_matches(query.publisher, pub_name):
         score += 5
 
-    # Series title similarity (+12 max) - NEW! Very discriminating signal
+    # Series title similarity (+12 max) - Very discriminating signal
     vol_name = vol.get("name", "")
-    if q_series_title and vol_name:
-        if title_matches(vol_name, q_series_title, threshold=0.6):
-            # Good title match - strong signal
+    if query.series_title and vol_name:
+        if title_matches(vol_name, query.series_title, threshold=0.6):
             score += 12
-        elif title_matches(vol_name, q_series_title, threshold=0.4):
-            # Partial title match - moderate signal
+        elif title_matches(vol_name, query.series_title, threshold=0.4):
             score += 6
 
     # Year from price (+8 max, with heavy penalties for impossible years)
     cover_date = detail_data.get("cover_date", "")
-    if cover_date and year_likelihood:
+    if cover_date and query.year_likelihood:
         parts = cover_date.split("-")
         if parts and parts[0].isdigit():
             cand_year = int(parts[0])
-            likelihood = year_likelihood.get(cand_year, 0.0)
+            likelihood = query.year_likelihood.get(cand_year, 0.0)
 
             if likelihood >= 1.0:
                 score += 8   # In expected range
@@ -1450,7 +1414,7 @@ def enhanced_candidate_scoring(detail_data: dict, q_issue_num: str, q_publisher:
                 score += 1   # Distant but possible
             else:
                 # Calculate how far outside the expected range
-                expected_years = [y for y, l in year_likelihood.items() if l >= 0.7]
+                expected_years = [y for y, l in query.year_likelihood.items() if l >= 0.7]
                 if expected_years:
                     min_year, max_year = min(expected_years), max(expected_years)
                     if cand_year > max_year:
@@ -1461,43 +1425,43 @@ def enhanced_candidate_scoring(detail_data: dict, q_issue_num: str, q_publisher:
                         years_off = 0
 
                     if years_off > 30:
-                        score -= 25  # WAY off (e.g., 2025 vs 1975) - nearly reject
+                        score -= 25
                     elif years_off > 15:
-                        score -= 15  # Very off (e.g., 1944 vs 1980)
+                        score -= 15
                     elif years_off > 5:
-                        score -= 8   # Somewhat off
+                        score -= 8
                     else:
-                        score -= 3   # Slightly outside expected range
+                        score -= 3
 
     # Month (+8 max, doubled from +4) - Very discriminating signal!
-    if cover_date and q_month_abbr:
+    if cover_date and query.month_abbr:
         parts = cover_date.split("-")
         if len(parts) >= 2:
             cand_month = MONTH_NUM_TO_ABBR.get(parts[1])
             if cand_month:
-                month_sim = month_similarity_score(q_month_abbr, cand_month)
+                month_sim = month_similarity_score(query.month_abbr, cand_month)
                 if month_sim >= 1.0:
-                    score += 8   # Exact match (was +4)
+                    score += 8
                 elif month_sim >= 0.7:
-                    score += 4   # ±1 month (was +2)
+                    score += 4
                 elif month_sim >= 0.4:
-                    score += 2   # ±2 months (was +1)
+                    score += 2
 
     # Story title (+1 max, reduced from +3) - Rarely useful
-    if story_tokens:
+    if query.story_tokens:
         story_blob = f"{detail_data.get('name', '')} {detail_data.get('deck', '')}".lower()
-        matched = sum(1 for tok in story_tokens if tok in story_blob)
-        if story_tokens:
-            score += (matched / len(story_tokens)) * 1
+        matched = sum(1 for tok in query.story_tokens if tok in story_blob)
+        if query.story_tokens:
+            score += (matched / len(query.story_tokens)) * 1
 
     # Characters (+2 max, reduced from +4) - Rarely useful
-    if q_characters_norm:
+    if query.characters_norm:
         char_credits = detail_data.get("character_credits", [])
         cv_chars = {normalize_char_name(c.get("name", "")) for c in char_credits} - {""}
         if cv_chars:
-            overlap = q_characters_norm & cv_chars
+            overlap = query.characters_norm & cv_chars
             if overlap:
-                score += (len(overlap) / len(q_characters_norm | cv_chars)) * 2
+                score += (len(overlap) / len(query.characters_norm | cv_chars)) * 2
 
     return score
 
@@ -1589,13 +1553,13 @@ def lookup_comicvine_for_gcd_match(gcd_result: dict) -> Optional[dict]:
     if not series_name or not issue_num:
         return None
 
-    print(f"[GCD→CV] Looking up '{series_name}' #{issue_num} on ComicVine...")
+    log(f"[GCD→CV] Looking up '{series_name}' #{issue_num} on ComicVine...")
 
     # Search for the volume using GCD's corrected series name
     volume_candidates = fetch_volume_candidates(series_name, publisher_name)
 
     if not volume_candidates:
-        print(f"[GCD→CV] No volumes found for '{series_name}'")
+        log(f"[GCD→CV] No volumes found for '{series_name}'")
         return None
 
     # Score and rank volumes, preferring ones that match the year
@@ -1619,11 +1583,51 @@ def lookup_comicvine_for_gcd_match(gcd_result: dict) -> Optional[dict]:
             for ic in issue_candidates:
                 detail = fetch_issue_details(ic.get("api_detail_url"))
                 if detail and detail.get("image"):
-                    print(f"[GCD→CV] ✓ Found: {vol_name} #{issue_num} (with cover image)")
+                    log(f"[GCD→CV] ✓ Found: {vol_name} #{issue_num} (with cover image)")
                     return detail
 
-    print(f"[GCD→CV] Could not find ComicVine match with cover image")
+    log(f"[GCD→CV] Could not find ComicVine match with cover image")
     return None
+
+def _score_candidates(
+    candidates: list,
+    all_candidates: dict,
+    query: QueryContext,
+    original_img_path: str,
+) -> tuple[dict | None, float | None]:
+    """Score and visually compare candidates. Returns (detail, score) on SAME match, else (None, None)."""
+    for cand in candidates:
+        issue_id = cand.get("id")
+        if issue_id in all_candidates:
+            continue
+
+        detail = fetch_issue_details(cand.get("api_detail_url"))
+        if not detail:
+            continue
+
+        score = enhanced_candidate_scoring(detail, query)
+        if score <= -1e5:
+            continue
+
+        is_match, adjusted_score, visual_result = _try_visual_match(
+            detail, original_img_path, score
+        )
+
+        vol_name = detail.get("volume", {}).get("name", "")
+        issue_no = detail.get("issue_number", "")
+
+        if visual_result:
+            log(f"  [{visual_result}] {vol_name} #{issue_no}: {score:.1f} -> {adjusted_score:.1f}")
+        else:
+            log(f"  [{adjusted_score:.1f}] {vol_name} #{issue_no}")
+
+        if is_match:
+            log(f"[RESULT] Best match: {vol_name} #{issue_no} (score: {adjusted_score:.1f})")
+            return detail, adjusted_score
+
+        all_candidates[issue_id] = (detail, adjusted_score)
+
+    return None, None
 
 # ------------------------------
 # Main Search Logic
@@ -1694,13 +1698,23 @@ def find_best_match(qwen_data: dict, original_img_path: str = None) -> tuple:
         if years:
             log(f"[PRICE] '{cover_price}' → years {min(years)}-{max(years)}")
 
+    query = QueryContext(
+        issue_num=issue_num,
+        publisher=publisher,
+        year_likelihood=year_likelihood,
+        month_abbr=cover_month,
+        story_tokens=story_tokens,
+        characters_norm=q_chars_norm,
+        series_title=search_title,
+    )
+
     all_candidates = {}
 
     # ========================================
     # STRATEGY GCD: Grand Comics Database (LOCAL - NO API CALLS!)
     # ========================================
     # Search local SQLite database FIRST - instant and no rate limits!
-    if USE_GCD and issue_num:
+    if cfg.use_gcd and issue_num:
         year_range = None
         if year_likelihood:
             years_filtered = [y for y, l in year_likelihood.items() if l >= 0.7]
@@ -1720,9 +1734,7 @@ def find_best_match(qwen_data: dict, original_img_path: str = None) -> tuple:
                 # Use the complete issue_data which now includes character_credits
                 detail = issue_data
 
-                score = enhanced_candidate_scoring(detail, issue_num, publisher, year_likelihood,
-                                                   cover_month, story_tokens, q_chars_norm,
-                                                   q_series_title=search_title)
+                score = enhanced_candidate_scoring(detail, query)
 
                 if score > -1e5:
                     vol_name = issue_data["volume"]["name"]
@@ -1739,7 +1751,7 @@ def find_best_match(qwen_data: dict, original_img_path: str = None) -> tuple:
             if best_gcd_score > 40:
                 log(f"[GCD] ✓ Strong match found locally (score > 40), skipping API calls!")
                 # Skip to visual comparison
-            elif best_gcd_score > 0 and USE_COMICVINE:
+            elif best_gcd_score > 0 and cfg.use_comicvine:
                 # Medium confidence - use GCD metadata to find ComicVine match for visual verification
                 log(f"[GCD] Medium confidence match (score {best_gcd_score:.1f}), searching ComicVine for cover images...")
 
@@ -1759,11 +1771,7 @@ def find_best_match(qwen_data: dict, original_img_path: str = None) -> tuple:
 
                     if cv_detail:
                         # Score the ComicVine result
-                        cv_score = enhanced_candidate_scoring(
-                            cv_detail, issue_num, publisher, year_likelihood,
-                            cover_month, story_tokens, q_chars_norm,
-                            q_series_title=search_title
-                        )
+                        cv_score = enhanced_candidate_scoring(cv_detail, query)
 
                         if cv_score > -1e5:
                             cv_id = cv_detail.get("id") or cv_detail.get("volume", {}).get("id")
@@ -1787,7 +1795,7 @@ def find_best_match(qwen_data: dict, original_img_path: str = None) -> tuple:
 
                                 all_candidates[cv_id] = (cv_detail, adjusted_score)
         else:
-            if USE_COMICVINE:
+            if cfg.use_comicvine:
                 log(f"[GCD] No local matches found, trying ComicVine API...")
             else:
                 log(f"[GCD] No local matches found (ComicVine API disabled)")
@@ -1796,7 +1804,7 @@ def find_best_match(qwen_data: dict, original_img_path: str = None) -> tuple:
     # STRATEGY 1: ComicVine Volume-based Search
     # ========================================
     # Only run if GCD didn't find a strong match (score <= 40)
-    if USE_COMICVINE and (not all_candidates or max(s for _, s in all_candidates.values()) <= 40):
+    if cfg.use_comicvine and (not all_candidates or max(s for _, s in all_candidates.values()) <= 40):
         log(f"[Strategy 1] Volume-based search for '{search_title}'")
 
         volume_candidates = fetch_volume_candidates(search_title, publisher)
@@ -1811,130 +1819,45 @@ def find_best_match(qwen_data: dict, original_img_path: str = None) -> tuple:
             if not volume_id:
                 continue
 
-            print(f"  Trying volume: {vol_name}")
+            log(f"  Trying volume: {vol_name}")
             issue_candidates = fetch_issue_candidates_for_volume(volume_id, issue_num)
-
-            for ic in issue_candidates:
-                issue_id = ic.get("id")
-                if issue_id in all_candidates:
-                    continue
-
-                detail = fetch_issue_details(ic.get("api_detail_url"))
-                if not detail:
-                    continue
-
-                score = enhanced_candidate_scoring(detail, issue_num, publisher, year_likelihood,
-                                                  cover_month, story_tokens, q_chars_norm,
-                                                  q_series_title=search_title)
-
-                if score > -1e5:
-                    # EARLY EXIT: Try visual comparison immediately
-                    is_match, adjusted_score, visual_result = _try_visual_match(
-                        detail, original_img_path, score
-                    )
-
-                    cv_vol_name = detail.get('volume', {}).get('name', '')
-                    issue_no = detail.get('issue_number', '')
-
-                    if visual_result:
-                        log(f"  [{visual_result}] {cv_vol_name} #{issue_no}: {score:.1f} → {adjusted_score:.1f}")
-                    else:
-                        print(f"    [{adjusted_score:.1f}] {cv_vol_name} #{issue_no}")
-
-                    if is_match:
-                        log(f"[RESULT] Best match: {cv_vol_name} #{issue_no} (score: {adjusted_score:.1f})")
-                        return detail, adjusted_score
-
-                    all_candidates[issue_id] = (detail, adjusted_score)
-
-            # If we found a SAME match, we already returned above
-            # Otherwise continue to next volume
+            result, result_score = _score_candidates(
+                issue_candidates, all_candidates, query, original_img_path,
+            )
+            if result:
+                return result, result_score
 
     # ========================================
     # STRATEGY 2: Issue + Month Search
     # ========================================
-    if USE_COMICVINE and issue_num and cover_month and (not all_candidates or max(s for _, s in all_candidates.values()) <= 40):
+    if cfg.use_comicvine and issue_num and cover_month and (not all_candidates or max(s for _, s in all_candidates.values()) <= 40):
         log(f"[Strategy 2] Issue+month search for #{issue_num} {cover_month}")
         candidates_2 = search_issues_by_number_and_month(
             issue_num, cover_month, year_likelihood, search_title, publisher
         )
 
-        for cand in candidates_2:
-            issue_id = cand.get("id")
-            if issue_id in all_candidates:
-                continue
-
-            detail = fetch_issue_details(cand.get("api_detail_url"))
-            if not detail:
-                continue
-
-            score = enhanced_candidate_scoring(detail, issue_num, publisher, year_likelihood,
-                                              cover_month, story_tokens, q_chars_norm,
-                                              q_series_title=search_title)
-
-            if score > -1e5:
-                # EARLY EXIT: Try visual comparison
-                is_match, adjusted_score, visual_result = _try_visual_match(
-                    detail, original_img_path, score
-                )
-
-                vol_name = detail.get('volume', {}).get('name', '')
-                issue_no = detail.get('issue_number', '')
-
-                if visual_result:
-                    log(f"  [{visual_result}] {vol_name} #{issue_no}: {score:.1f} → {adjusted_score:.1f}")
-                else:
-                    print(f"  [{adjusted_score:.1f}] {vol_name} #{issue_no}")
-
-                if is_match:
-                    log(f"[RESULT] Best match: {vol_name} #{issue_no} (score: {adjusted_score:.1f})")
-                    return detail, adjusted_score
-
-                all_candidates[issue_id] = (detail, adjusted_score)
+        result, result_score = _score_candidates(
+            candidates_2, all_candidates, query, original_img_path,
+        )
+        if result:
+            return result, result_score
 
     # ========================================
     # STRATEGY 3: Direct Issue Search (last resort)
     # ========================================
-    if USE_COMICVINE and issue_num and (not all_candidates or max(s for _, s in all_candidates.values()) <= 40):
+    if cfg.use_comicvine and issue_num and (not all_candidates or max(s for _, s in all_candidates.values()) <= 40):
         log(f"[Strategy 3] Direct issue search for #{issue_num}")
         candidates_3 = search_issues_directly(search_title, issue_num, publisher)
         log(f"[Strategy 3] Found {len(candidates_3)} candidates")
 
-        for cand in candidates_3:
-            issue_id = cand.get("id")
-            if issue_id in all_candidates:
-                continue
-
-            detail = fetch_issue_details(cand.get("api_detail_url"))
-            if not detail:
-                continue
-
-            score = enhanced_candidate_scoring(detail, issue_num, publisher, year_likelihood,
-                                              cover_month, story_tokens, q_chars_norm,
-                                              q_series_title=search_title)
-
-            if score > -1e5:
-                # EARLY EXIT: Try visual comparison
-                is_match, adjusted_score, visual_result = _try_visual_match(
-                    detail, original_img_path, score
-                )
-
-                vol_name = detail.get('volume', {}).get('name', '')
-                issue_no = detail.get('issue_number', '')
-
-                if visual_result:
-                    log(f"  [{visual_result}] {vol_name} #{issue_no}: {score:.1f} → {adjusted_score:.1f}")
-                else:
-                    print(f"  [{adjusted_score:.1f}] {vol_name} #{issue_no}")
-
-                if is_match:
-                    log(f"[RESULT] Best match: {vol_name} #{issue_no} (score: {adjusted_score:.1f})")
-                    return detail, adjusted_score
-
-                all_candidates[issue_id] = (detail, adjusted_score)
+        result, result_score = _score_candidates(
+            candidates_3, all_candidates, query, original_img_path,
+        )
+        if result:
+            return result, result_score
 
     if not all_candidates:
-        print("[RESULT] No candidates found")
+        log("[RESULT] No candidates found")
         return None, 0.0
 
     # Select best (if we reach here, no visual SAME match was found)
@@ -1960,76 +1883,58 @@ def deduplicate_tsv(tsv_path: str):
         return
 
     try:
-        # Read all entries, keeping track of order and data
-        file_data = {}  # filename → (full_line, line_number)
-        header = None
+        rows = read_tsv_rows(tsv_path)
+        total_entries = len(rows)
 
-        with open(tsv_path, "r", encoding="utf-8") as f:
-            header = f.readline()  # Save header
-            line_num = 0
-            for line in f:
-                parts = line.strip().split("\t")
-                if len(parts) >= 9:
-                    # New schema: title|issue_number|month|year|publisher|box|filename|notes|confidence
-                    key = (parts[5], parts[6])  # (box, filename)
-                    file_data[key] = (line, line_num)
-                    line_num += 1
+        # Keep last occurrence of each (box, filename)
+        file_data = {}
+        for i, row in enumerate(rows):
+            key = (row.get("box", ""), row.get("filename", ""))
+            file_data[key] = (row, i)
 
-        # Count duplicates before deduplication
-        total_entries = line_num
         unique_entries = len(file_data)
         duplicates_removed = total_entries - unique_entries
 
         if duplicates_removed > 0:
-            # Write back deduplicated data
-            with open(tsv_path, "w", encoding="utf-8") as f:
-                f.write(header)
-                # Sort by original line number to maintain chronological order
-                for filename, (line, _) in sorted(file_data.items(), key=lambda x: x[1][1]):
-                    f.write(line)
+            with open(tsv_path, "w", encoding="utf-8", newline="") as f:
+                f.write(TSV_HEADER)
+                writer = csv.DictWriter(f, fieldnames=TSV_COLUMNS, delimiter="\t", extrasaction="ignore")
+                for _key, (row, _idx) in sorted(file_data.items(), key=lambda x: x[1][1]):
+                    writer.writerow(row)
 
-            print(f"[TSV] Deduplicated: removed {duplicates_removed} duplicate entries, kept {unique_entries} unique files")
+            log(f"[TSV] Deduplicated: removed {duplicates_removed} duplicate entries, kept {unique_entries} unique files")
         else:
-            print(f"[TSV] No duplicates found ({unique_entries} unique files)")
+            log(f"[TSV] No duplicates found ({unique_entries} unique files)")
 
     except Exception as e:
-        print(f"[TSV] Deduplication failed: {e}")
+        log(f"[TSV] Deduplication failed: {e}")
 
 def process_box(box_name: str, image_dir: str, outfile: str, logfile: str):
     """Process a single box folder."""
-    global LOG_HANDLE
-
     IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".tiff", ".tif", ".webp", ".bmp")
 
     # Resume logic - works in both single-box and batch mode
     processed_files = set()
-    if USE_RESUME and os.path.exists(outfile):
+    if cfg.use_resume and os.path.exists(outfile):
         deduplicate_tsv(outfile)
         try:
+            rows = read_tsv_rows(outfile)
             file_confidence = {}
-            with open(outfile, "r", encoding="utf-8") as f:
-                next(f)  # Skip header
-                for line in f:
-                    parts = line.strip().split("\t")
-                    if len(parts) >= 9:
-                        # New schema: title|issue_number|month|year|publisher|box|filename|notes|confidence
-                        row_box = parts[5]
-                        row_fname = parts[6]
-                        row_confidence = parts[8]
-                        key = (row_box, row_fname) if BATCH_MODE else row_fname
-                        file_confidence[key] = row_confidence
+            for row in rows:
+                key = (row["box"], row["filename"]) if cfg.batch_mode else row["filename"]
+                file_confidence[key] = row.get("confidence", "")
 
             for key, confidence in file_confidence.items():
                 if confidence == "high":
                     processed_files.add(key)
 
             low_medium_count = len([c for c in file_confidence.values() if c in ["low", "medium"]])
-            print(f"[INFO] Resuming {box_name}: {len(processed_files)} high-confidence skipped, {low_medium_count} to retry")
-        except Exception:
+            log(f"[INFO] Resuming {box_name}: {len(processed_files)} high-confidence skipped, {low_medium_count} to retry")
+        except (OSError, KeyError, ValueError):
             pass
 
     # Open log file
-    LOG_HANDLE = open(logfile, "a" if BATCH_MODE else "w", encoding="utf-8")
+    cfg.log_handle = open(logfile, "a" if cfg.batch_mode else "w", encoding="utf-8")
     log(f"\nOdinsList Run Log - {box_name}")
     log(f"Started: {time.strftime('%Y-%m-%d %H:%M:%S')}")
     log("=" * 80)
@@ -2040,8 +1945,8 @@ def process_box(box_name: str, image_dir: str, outfile: str, logfile: str):
 
     processed_count = 0
     for i, fname in enumerate(all_files, 1):
-        resume_key = (box_name, fname) if BATCH_MODE else fname
-        if USE_RESUME and resume_key in processed_files:
+        resume_key = (box_name, fname) if cfg.batch_mode else fname
+        if cfg.use_resume and resume_key in processed_files:
             continue
 
         img_path = os.path.join(image_dir, fname)
@@ -2049,8 +1954,8 @@ def process_box(box_name: str, image_dir: str, outfile: str, logfile: str):
 
         # Extract with VLM
         img64 = load_image_b64(img_path)
-        resp = client.chat.completions.create(
-            model=MODEL_NAME,
+        resp = cfg.client.chat.completions.create(
+            model=cfg.model_name,
             messages=[{
                 "role": "user",
                 "content": [
@@ -2126,8 +2031,8 @@ def process_box(box_name: str, image_dir: str, outfile: str, logfile: str):
     log(f"DONE {box_name}: {processed_count} images processed")
     log(f"Finished: {time.strftime('%Y-%m-%d %H:%M:%S')}")
 
-    if not BATCH_MODE:
-        LOG_HANDLE.close()
+    if not cfg.batch_mode:
+        cfg.log_handle.close()
 
     return processed_count
 
@@ -2136,7 +2041,16 @@ def process_box(box_name: str, image_dir: str, outfile: str, logfile: str):
 # MAIN EXECUTION
 # ============================================================================
 
-TSV_HEADER = "title\tissue_number\tmonth\tyear\tpublisher\tbox\tfilename\tnotes\tconfidence\n"
+TSV_COLUMNS = ["title", "issue_number", "month", "year", "publisher", "box", "filename", "notes", "confidence"]
+TSV_HEADER = "\t".join(TSV_COLUMNS) + "\n"
+
+def read_tsv_rows(tsv_path: str) -> list[dict]:
+    """Read TSV file into list of dicts with named columns."""
+    if not os.path.exists(tsv_path):
+        return []
+    with open(tsv_path, "r", encoding="utf-8") as f:
+        reader = csv.DictReader(f, delimiter="\t")
+        return list(reader)
 
 
 def _auto_detect_gcd_db(images_dir: str) -> Optional[str]:
@@ -2152,9 +2066,6 @@ def _auto_detect_gcd_db(images_dir: str) -> Optional[str]:
 
 
 def main():
-    global client, VLM_BASE_URL, MODEL_NAME, BATCH_MODE, BOX_NAME, BASE_DIR
-    global GCD_DB_PATH, USE_GCD, USE_COMICVINE, USE_RESUME, OUTFILE, LOGFILE, LOG_HANDLE
-
     parser = argparse.ArgumentParser(
         description="OdinsList — comic book cataloging via VLM + database cross-reference",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -2181,26 +2092,26 @@ def main():
     args = parser.parse_args()
 
     # --- Populate config from CLI > env > defaults ---
-    BASE_DIR = os.path.abspath(args.images)
-    if not os.path.isdir(BASE_DIR):
-        parser.error(f"Images directory not found: {BASE_DIR}")
+    cfg.base_dir = os.path.abspath(args.images)
+    if not os.path.isdir(cfg.base_dir):
+        parser.error(f"Images directory not found: {cfg.base_dir}")
 
-    BATCH_MODE = args.batch
-    BOX_NAME = args.box
-    USE_RESUME = args.resume
+    cfg.batch_mode = args.batch
+    cfg.box_name = args.box
+    cfg.use_resume = args.resume
 
     # VLM configuration
     if args.vlm_url:
-        VLM_BASE_URL = args.vlm_url
+        cfg.vlm_base_url = args.vlm_url
     if args.vlm_model:
-        MODEL_NAME = args.vlm_model
-    if not MODEL_NAME:
+        cfg.model_name = args.vlm_model
+    if not cfg.model_name:
         parser.error("VLM model name is required. Set --vlm-model or VLM_MODEL env var.")
 
     # ComicVine API
     if args.no_comicvine:
-        USE_COMICVINE = False
-    elif not COMICVINE_API_KEY:
+        cfg.use_comicvine = False
+    elif not cfg.comicvine_api_key:
         print("[ERROR] COMICVINE_API_KEY not set. Export it or add to .env file.")
         print("  Get a free key at: https://comicvine.gamespot.com/api/")
         print("  Or use --no-comicvine for GCD-only mode.")
@@ -2208,94 +2119,88 @@ def main():
 
     # GCD database
     if args.no_gcd:
-        USE_GCD = False
-        GCD_DB_PATH = None
+        cfg.use_gcd = False
+        cfg.gcd_db_path = None
     elif args.gcd_db:
-        GCD_DB_PATH = os.path.abspath(args.gcd_db)
-        if not os.path.exists(GCD_DB_PATH):
-            parser.error(f"GCD database not found: {GCD_DB_PATH}")
+        cfg.gcd_db_path = os.path.abspath(args.gcd_db)
+        if not os.path.exists(cfg.gcd_db_path):
+            parser.error(f"GCD database not found: {cfg.gcd_db_path}")
     else:
-        GCD_DB_PATH = _auto_detect_gcd_db(BASE_DIR)
-        if GCD_DB_PATH:
-            print(f"[INFO] Auto-detected GCD database: {GCD_DB_PATH}")
+        cfg.gcd_db_path = _auto_detect_gcd_db(cfg.base_dir)
+        if cfg.gcd_db_path:
+            print(f"[INFO] Auto-detected GCD database: {cfg.gcd_db_path}")
         else:
             print("[INFO] No GCD database found, using ComicVine API only")
-            USE_GCD = False
+            cfg.use_gcd = False
 
     # Disable visual comparison if requested
     if args.no_visual:
-        # Monkey-patch the visual match function to always skip
-        import types
-        def _skip_visual(candidate_detail, original_img_path, current_score):
-            return False, current_score, None
-        import sys
-        this_module = sys.modules[__name__]
-        this_module._try_visual_match = _skip_visual
+        cfg.use_visual = False
 
     # Initialize VLM client
-    client = OpenAI(base_url=VLM_BASE_URL, api_key="not-needed")
+    cfg.client = OpenAI(base_url=cfg.vlm_base_url, api_key="not-needed")
     setup_cover_cache()
-    print(f"[INFO] VLM endpoint: {VLM_BASE_URL}")
-    print(f"[INFO] VLM model: {MODEL_NAME}")
-    print(f"[INFO] Cover cache: {COVER_CACHE_DIR}")
+    print(f"[INFO] VLM endpoint: {cfg.vlm_base_url}")
+    print(f"[INFO] VLM model: {cfg.model_name}")
+    print(f"[INFO] Cover cache: {cfg.cover_cache_dir}")
 
     # --- Run ---
-    if BATCH_MODE:
-        box_folders = sorted(globmod.glob(os.path.join(BASE_DIR, "Box_*")))
+    if cfg.batch_mode:
+        box_folders = sorted(globmod.glob(os.path.join(cfg.base_dir, "Box_*")))
         box_folders = [d for d in box_folders if os.path.isdir(d)]
 
         if not box_folders:
-            print(f"[ERROR] No Box_* folders found in {BASE_DIR}")
+            print(f"[ERROR] No Box_* folders found in {cfg.base_dir}")
             exit(1)
 
         print(f"[BATCH] Found {len(box_folders)} box folders to process")
 
-        OUTFILE = args.out or os.path.join(BASE_DIR, "odinslist_output.tsv")
-        LOGFILE = os.path.splitext(OUTFILE)[0] + ".log"
+        cfg.outfile = args.out or os.path.join(cfg.base_dir, "odinslist_output.tsv")
+        cfg.logfile = os.path.splitext(cfg.outfile)[0] + ".log"
 
         # Only create fresh header if not resuming or file doesn't exist
-        if USE_RESUME and os.path.exists(OUTFILE):
-            print(f"[INFO] Resuming into existing TSV: {OUTFILE}")
+        if cfg.use_resume and os.path.exists(cfg.outfile):
+            print(f"[INFO] Resuming into existing TSV: {cfg.outfile}")
         else:
-            if os.path.exists(LOGFILE):
-                os.remove(LOGFILE)
-            with open(OUTFILE, "w", encoding="utf-8") as f:
+            if os.path.exists(cfg.logfile):
+                os.remove(cfg.logfile)
+            with open(cfg.outfile, "w", encoding="utf-8") as f:
                 f.write(TSV_HEADER)
 
         total_processed = 0
         for box_path in box_folders:
             box_name = os.path.basename(box_path)
             print(f"\n[BATCH] Processing {box_name}...")
-            count = process_box(box_name, box_path, OUTFILE, LOGFILE)
+            count = process_box(box_name, box_path, cfg.outfile, cfg.logfile)
             total_processed += count
 
-        if LOG_HANDLE:
-            LOG_HANDLE.close()
+        if cfg.log_handle:
+            cfg.log_handle.close()
 
         print(f"\n[BATCH] Complete! Processed {total_processed} images from {len(box_folders)} boxes")
-        print(f"[BATCH] Results: {OUTFILE}")
-        print(f"[BATCH] Log: {LOGFILE}")
+        print(f"[BATCH] Results: {cfg.outfile}")
+        print(f"[BATCH] Log: {cfg.logfile}")
 
     else:
-        IMAGE_DIR = os.path.join(BASE_DIR, BOX_NAME)
-        OUTFILE = args.out or os.path.join(BASE_DIR, BOX_NAME, f"{BOX_NAME}.tsv")
-        LOGFILE = os.path.splitext(OUTFILE)[0] + ".log"
+        image_dir = os.path.join(cfg.base_dir, cfg.box_name)
+        cfg.outfile = args.out or os.path.join(cfg.base_dir, cfg.box_name, f"{cfg.box_name}.tsv")
+        cfg.logfile = os.path.splitext(cfg.outfile)[0] + ".log"
 
-        if not os.path.isdir(IMAGE_DIR):
-            print(f"[ERROR] Directory not found: {IMAGE_DIR}")
+        if not os.path.isdir(image_dir):
+            print(f"[ERROR] Directory not found: {image_dir}")
             exit(1)
 
         # Only create fresh header if not resuming or file doesn't exist
-        if USE_RESUME and os.path.exists(OUTFILE):
-            print(f"[INFO] Resuming into existing TSV: {OUTFILE}")
+        if cfg.use_resume and os.path.exists(cfg.outfile):
+            print(f"[INFO] Resuming into existing TSV: {cfg.outfile}")
         else:
-            with open(OUTFILE, "w", encoding="utf-8") as f:
+            with open(cfg.outfile, "w", encoding="utf-8") as f:
                 f.write(TSV_HEADER)
 
-        process_box(BOX_NAME, IMAGE_DIR, OUTFILE, LOGFILE)
+        process_box(cfg.box_name, image_dir, cfg.outfile, cfg.logfile)
 
-        print(f"\nResults written to: {OUTFILE}")
-        print(f"Log written to: {LOGFILE}")
+        print(f"\nResults written to: {cfg.outfile}")
+        print(f"Log written to: {cfg.logfile}")
 
 
 if __name__ == "__main__":
