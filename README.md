@@ -69,7 +69,7 @@ python OdinsList.py --images /path/to/Comic_Photos --batch
 - Python 3.10+
 - A vision-capable language model (see [Supported Models](#supported-models))
 - ComicVine API key (free at [comicvine.gamespot.com](https://comicvine.gamespot.com/api/))
-- Grand Comics Database dump (optional but recommended)
+- Grand Comics Database dump (https://docs.comics.org/wiki/Main_Page#Database)
 
 ## Setup
 
