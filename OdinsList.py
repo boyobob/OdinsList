@@ -943,6 +943,10 @@ def is_valid_series_descriptor(descriptor: str) -> bool:
     if any(kw in descriptor_lower for kw in valid_keywords):
         return True
 
+    # Also valid if it's a known anthology series name
+    if is_anthology_series(descriptor):
+        return True
+
     # Reject if it looks like story text (too long, has exclamation marks, etc.)
     if len(descriptor) > 40:  # Increased to allow "Marvel Team-Up" etc.
         return False
@@ -963,10 +967,7 @@ def is_anthology_series(descriptor: str) -> bool:
     # Anthology series where the descriptor IS the actual series name
     # NOTE: "presents" removed - it's a subtitle format, not a series name
     # "Marvel Two-In-One Presents" is NOT the same as "DC Comics Presents"
-    anthology_keywords = ["team-up", "two-in-one", "two in one",
-                          "dc comics presents", "triple action", "marvel premiere",
-                          "showcase", "brave and the bold", "marvel fanfare",
-                          "marvel feature", "marvel spotlight"]
+    anthology_keywords = ["team-up","team up","two-in-one","two in one","three-in-one","dc comics presents","dc comics presents annual","marvel team-up","marvel team up","marvel team-up annual","marvel two-in-one","marvel two in one","showcase","1st issue special","first issue special","dc special","dc special series","secret origins","the brave and the bold","brave and the bold","batman the brave and the bold","strange tales","tales to astonish","tales of suspense","journey into mystery","journey into mystery annual","adventure comics","action comics","detective comics","adventure into fear","astonishing tales","marvel premiere","marvel spotlight","marvel feature","marvel presents","marvel comics presents","marvel fanfare","marvel preview","marvel super action","marvel super-heroes","marvel super heroes","marvel super special","special marvel edition","marvel collectors' item classics","marvel tales","fantasy masterpieces","marvel chillers","monsters on the prowl","where monsters dwell","where creatures roam","vault of evil","chamber of darkness","chamber of chills","dead of night","supernatural thrillers","tower of shadows","worlds unknown","unknown worlds of science fiction","unknown worlds","creatures on the loose","fear","frankenstein","house of mystery","house of secrets","ghosts","the unexpected","unexpected","secrets of haunted house","the witching hour","weird war tales","star spangled war stories","our army at war","weird western tales","weird mystery tales","time warp","the superman family","creepy","eerie","vampirella","twisted tales","alien worlds","epic illustrated","amazing adventures","amazing adult fantasy","amazing fantasy","all-star comics","sensation comics","whiz comics","planet comics","mystery in space","strange adventures","tales from the crypt","the haunt of fear","the vault of horror","dark horse presents","negative burn","2000 ad","heavy metal","solo","a1","flight","raw","marvel super-teams","world’s finest comics","brave and the bold special","venture","a-next","star spangled comics","bizarre adventures","ghostly tales","chilling adventures in sorcery", "what if", "what if?", "what if?...", "what if..."]
 
     return any(kw in descriptor_lower for kw in anthology_keywords)
 
@@ -1720,6 +1721,16 @@ def find_best_match(qwen_data: dict, original_img_path: str = None) -> tuple:
             years_filtered = [y for y, l in year_likelihood.items() if l >= 0.7]
             if years_filtered:
                 year_range = (min(years_filtered), max(years_filtered))
+
+        # Widen year range for king-size/giant-size (atypical pricing makes price→year unreliable)
+        if series_descriptor and any(kw in series_descriptor.lower() for kw in ["giant-size", "giant size", "king-size", "king size"]):
+            if year_range:
+                year_range = (year_range[0] - 10, year_range[1] + 10)
+                log(f"[INFO] Widened year range for '{series_descriptor}': {year_range[0]}-{year_range[1]}")
+            else:
+                # No price data — use broad range covering the giant/king-size era
+                year_range = (1966, 1985)
+                log(f"[INFO] No price year data; using broad range for '{series_descriptor}': 1966-1985")
 
         log(f"[GCD] Searching local database for '{search_title}' #{issue_num}...")
         gcd_results = search_gcd(search_title, issue_num, publisher, year_range, cover_month)
