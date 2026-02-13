@@ -27,7 +27,7 @@ python OdinsList.py --images /path/to/Comic_Photos --batch
 ## Features
 
 - **Vision-based extraction**: Uses vision language models to read comic covers and extract metadata
-- **Multi-database verification**: Cross-references the Grand Comics Database (local SQLite) first, and then ComicVine API if a local match is not found
+- **Multi-database verification**: Cross-references the Grand Comics Database (local SQLite) first, and then ComicVine API if a local match is not found (OdinsList can run with either data source independently, but optimal performance and accuracy are achieved when both are enabled. The local GCD SQLite database provides fast, offline lookups for the majority of matches, while the ComicVine API serves as a secondary validation layer, handling edge cases and confirming uncertain matches through visual comparison when GCD results are incomplete or ambiguous. FOR BEST RESULTS, ENABLE BOTH SOURCES)
 - **Visual cover matching**: Compares your cover photo against database covers (only if escalated to ComicVine API) to verify matches
 - **Confidence scoring**: Each result includes a confidence level (high/medium/low) based on match quality
 - **Batch processing**: Process entire collections organized in box folders
