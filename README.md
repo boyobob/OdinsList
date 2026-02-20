@@ -118,7 +118,7 @@ Example with vLLM:
 vllm serve lhoang8500/Qwen3-VL-8B-Instruct-NVFP4 --port 8000
 ```
 
-### 5. (Optional) Set up Grand Comics Database
+### 5. Set up Grand Comics Database
 
 The local GCD DB significantly improves accuracy and speed and reduces API calls to ComicVine:
 
