@@ -250,11 +250,8 @@ In testing on a collection of ~3,000 comics:
 
 ## Roadmap
 
-- [ ] Configuration file support (YAML/TOML)
-- [ ] Multiple model provider support (Anthropic, Google, etc.)
-- [ ] Web UI for non-technical users
-- [ ] JSON output format
-- [ ] Docker container with bundled model
+- Interactive TUI, with setup wizard, and live ANSI image previews coming soon!
+  <img width="734" height="676" alt="odinslist_tui" src="https://github.com/user-attachments/assets/37e10d54-313c-4944-8c7f-56256fe3f4d1" />
 
 ## Contributing
 
