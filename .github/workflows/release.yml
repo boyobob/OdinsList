@@ -28,6 +28,9 @@ jobs:
       - name: Install dependencies
         run: cd src/tui && bun install --frozen-lockfile
 
+      - name: Install cross-platform native dependency
+        run: cd src/tui && bun add --optional @opentui/core-${{ matrix.target }}
+
       - name: Build binary
         run: cd src/tui && bun run build:${{ matrix.target }}
 
