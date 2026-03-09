@@ -8,7 +8,6 @@ import { NewRunWizard } from "./components/NewRunWizard"
 import { ActiveRunView } from "./components/ActiveRunView"
 import { ResultsView } from "./components/ResultsView"
 import { SettingsView } from "./components/SettingsView"
-import { SetupView } from "./components/SetupView"
 import type { Config, ComicResult, ScanEvent, RunMode, ResumeStats } from "./types"
 import { colors } from "./theme"
 import { parseAnsiArt } from "./utils/ansiArt"
@@ -18,7 +17,6 @@ import { EYE_LOGO_RAW, TEXT_LOGO_RAW } from "./embeddedAssets"
 const EYE_LOGO_ROWS = parseAnsiArt(EYE_LOGO_RAW)
 
 const statusBarContent: Record<string, { left: string; right: string }> = {
-  setup: { left: "Enter: Continue", right: "Ctrl+Shift+V: Paste" },
   results: { left: "/: Search  ⋄  Tab: Toggle Focus", right: "Esc: Back" },
   settings: {
     left: "[Tab/Shift+Tab] Navigate  ⋄  [Enter/Space] Toggle",
@@ -59,9 +57,6 @@ export function App() {
     const unsub = backend.onEvent((event: ScanEvent) => {
       if (event.event === "config") {
         setConfig(event.config)
-        if (event.config.is_first_run) {
-          go("setup")
-        }
       }
       if (event.event === "ScanComplete") {
         setResults(prev => [...prev, event.result])
@@ -94,11 +89,6 @@ export function App() {
       back()
     }
   })
-
-  const handleSetupComplete = useCallback((partialConfig: Partial<Config>) => {
-    backend.sendCommand({ cmd: "set-config", config: partialConfig })
-    go("home")
-  }, [backend, go])
 
   const handleSaveSettings = useCallback((newConfig: Config) => {
     backend.sendCommand({ cmd: "set-config", config: newConfig })
@@ -200,10 +190,6 @@ export function App() {
   return (
     <box flexDirection="column" width="100%" height="100%">
       <box flexGrow={1}>
-        {state === "setup" && (
-          <SetupView onComplete={handleSetupComplete} />
-        )}
-
         {state === "results" && (
           <ResultsView results={results} onBack={() => go("home")} />
         )}
