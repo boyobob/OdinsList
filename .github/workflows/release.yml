@@ -28,11 +28,11 @@ jobs:
       - name: Install dependencies
         run: cd src/tui && bun install --frozen-lockfile
 
-      - name: Install cross-platform native dependency
+      - name: Install matching cross-platform native dependency
         run: |
           cd src/tui
           PKG="@opentui/core-${{ matrix.target }}"
-          VERSION=$(bunx npm view "$PKG" version)
+          VERSION=$(bun -e 'const pkg = await Bun.file("./node_modules/@opentui/core/package.json").json(); console.log(pkg.version)')
           TARBALL_URL=$(bunx npm view "$PKG@$VERSION" dist.tarball)
           mkdir -p "node_modules/$PKG"
           curl -fsSL "$TARBALL_URL" | tar -xz --strip-components=1 -C "node_modules/$PKG"

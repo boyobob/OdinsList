@@ -6,7 +6,7 @@
 
 OdinsList is an automated comic cataloging tool with an interactive TUI built on [OpenTUI](https://github.com/anthropics/opentui). It identifies issues directly from cover images using a vision-language model, then cross-references results with the Grand Comics Database and ComicVine to generate structured, high-confidence collection data with minimal manual entry.
 
-Version: `0.2.2`
+Version: `0.2.3`
 
 ## How It Works
 
