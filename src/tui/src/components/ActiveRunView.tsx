@@ -1112,15 +1112,18 @@ export function ActiveRunView({
     const selectedFolder = singleBoxDir || currentBox || "(not set)"
     const resultsPath = outputTsvPath || "(not set)"
     const totalProcessed = stats.high + stats.medium + stats.low
-    const showTextLogo = textLogoRaw && height >= 18
-    const showEyeLogo = eyeLogoRows && width >= 85 && height >= 42
+    const eyeLogoWidth = Math.max(...(eyeLogoRows?.map(row => row.reduce((sum, segment) => sum + segment.text.length, 0)) ?? [0]))
+    const eyeLogoHeight = eyeLogoRows?.length ?? 0
+    const textLogoHeight = textLogoRaw ? textLogoRaw.split("\n").length : 0
+    const showTextLogo = Boolean(textLogoRaw) && height >= textLogoHeight + 8
+    const showEyeLogo = Boolean(eyeLogoRows?.length) && width >= eyeLogoWidth + 2 && height >= eyeLogoHeight + textLogoHeight + 12
 
     return (
       <box flexDirection="column" width="100%" height="100%">
         <box flexDirection="column" alignItems="center" flexGrow={1}>
           {showTextLogo && (
             <box flexDirection="column" alignItems="center" paddingTop={1}>
-              {showEyeLogo && <AnsiArt rows={eyeLogoRows} />}
+              {showEyeLogo && <AnsiArt rows={eyeLogoRows!} />}
               <text fg={colors.fg}>{textLogoRaw}</text>
             </box>
           )}

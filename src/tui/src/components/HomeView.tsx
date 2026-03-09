@@ -8,6 +8,7 @@ import { colors } from "../theme"
 import type { AnsiSegment } from "../utils/ansiArt"
 
 interface HomeViewProps {
+  configReady: boolean
   eyeLogoRows: AnsiSegment[][]
   textLogoRaw: string
   configErrors: string[]
@@ -17,7 +18,7 @@ interface HomeViewProps {
   onSettings: () => void
 }
 
-export function HomeView({ eyeLogoRows, textLogoRaw, configErrors, configWarnings, onStartNewRun, onResumeRun, onSettings }: HomeViewProps) {
+export function HomeView({ configReady, eyeLogoRows, textLogoRaw, configErrors, configWarnings, onStartNewRun, onResumeRun, onSettings }: HomeViewProps) {
   const renderer = useRenderer()
   const { width, height } = useTerminalDimensions()
   const [showHelp, setShowHelp] = useState(false)
@@ -32,19 +33,23 @@ export function HomeView({ eyeLogoRows, textLogoRaw, configErrors, configWarning
   const compact = height < 25
 
   const items: MenuItem[] = [
-    { label: hasErrors ? "Start New Run (blocked)" : "Start New Run", value: "new_run" },
-    { label: "Resume Run", value: "resume" },
-    { label: "Settings/Config", value: "settings" },
+    { label: !configReady ? "Start New Run (loading...)" : hasErrors ? "Start New Run (blocked)" : "Start New Run", value: "new_run" },
+    { label: configReady ? "Resume Run" : "Resume Run (loading...)", value: "resume" },
+    { label: configReady ? "Settings/Config" : "Settings/Config (loading...)", value: "settings" },
     { label: "Quit", value: "quit" },
   ]
 
   const handleSelect = (item: MenuItem) => {
     switch (item.value) {
       case "new_run":
-        if (!hasErrors) onStartNewRun()
+        if (configReady && !hasErrors) onStartNewRun()
         break
-      case "resume": onResumeRun(); break
-      case "settings": onSettings(); break
+      case "resume":
+        if (configReady) onResumeRun()
+        break
+      case "settings":
+        if (configReady) onSettings()
+        break
       case "quit": renderer.destroy(); break
     }
   }

@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from "react"
 import { useRenderer, useTerminalDimensions } from "@opentui/react"
+import { homedir } from "os"
 import { DirectoryPicker } from "./DirectoryPicker"
 import { AnsiArt } from "./AnsiArt"
 import { StatusBar } from "./StatusBar"
@@ -31,6 +32,10 @@ export function NewRunWizard({ mode, eyeLogoRows, textLogoRaw, config, sendComma
   const renderer = useRenderer()
   const { width, height } = useTerminalDimensions()
   const isResumeWizard = mode === "resume"
+  const pickerStartPath = homedir()
+  const eyeLogoWidth = Math.max(...eyeLogoRows.map(row => row.reduce((sum, segment) => sum + segment.text.length, 0)))
+  const eyeLogoHeight = eyeLogoRows.length
+  const textLogoHeight = textLogoRaw.split("\n").length
 
   const [step, setStep] = useState<WizardStep>(isResumeWizard ? "resume_path" : "dir_select")
   const [inputRootDir, setInputRootDir] = useState(isResumeWizard ? config.input_root_dir : "")
@@ -230,8 +235,8 @@ export function NewRunWizard({ mode, eyeLogoRows, textLogoRaw, config, sendComma
     return () => { renderer.keyInput.off("keypress", handler) }
   }, [step, modeIndex, candidateFolders, folderCursor, inputRootDir, runMode, singleBoxDir, outputTsvPath, onCancel, onStartRun, isResumeWizard, config])
 
-  const showTextLogo = height >= 18
-  const showEyeLogo = width >= 85 && height >= 42
+  const showTextLogo = height >= textLogoHeight + 8
+  const showEyeLogo = width >= eyeLogoWidth + 2 && height >= eyeLogoHeight + textLogoHeight + 12
   const selectorWidth = Math.max(24, Math.min(width - 4, 110))
   const selectorHeight = Math.max(10, height - (showTextLogo ? (showEyeLogo ? 20 : 10) : 6))
   const outputInputWidth = Math.max(30, Math.min(width - 8, 100))
@@ -259,7 +264,7 @@ export function NewRunWizard({ mode, eyeLogoRows, textLogoRaw, config, sendComma
         <box flexGrow={1} alignItems="center" justifyContent="center" paddingX={2} paddingY={1}>
           <box width={selectorWidth} height={selectorHeight}>
             <DirectoryPicker
-              startPath={process.env.HOME || "/home"}
+              startPath={pickerStartPath}
               sendCommand={sendCommand}
               onEvent={onEvent}
               onSelect={(path) => {

@@ -9,6 +9,18 @@ interface BackendState {
   events: ScanEvent[]
 }
 
+function writeCommand(proc: ReturnType<typeof Bun.spawn> | null, command: Command) {
+  if (!proc) return
+
+  try {
+    const stdin = proc.stdin as import("bun").FileSink
+    stdin.write(JSON.stringify(command) + "\n")
+    stdin.flush()
+  } catch {
+    // Backend may already be gone during shutdown or startup failure.
+  }
+}
+
 export function useBackend() {
   const [state, setState] = useState<BackendState>({ ready: false, events: [] })
   const procRef = useRef<ReturnType<typeof Bun.spawn> | null>(null)
@@ -75,20 +87,14 @@ export function useBackend() {
     readLines()
 
     return () => {
-      const stdin = proc.stdin as import("bun").FileSink
-      stdin.write(JSON.stringify({ cmd: "quit" }) + "\n")
-      stdin.flush()
+      writeCommand(proc, { cmd: "quit" })
       proc.kill()
       procRef.current = null
     }
   }, [])
 
   const sendCommand = useCallback((command: Command) => {
-    const proc = procRef.current
-    if (!proc) return
-    const stdin = proc.stdin as import("bun").FileSink
-    stdin.write(JSON.stringify(command) + "\n")
-    stdin.flush()
+    writeCommand(procRef.current, command)
   }, [])
 
   const onEvent = useCallback((listener: (event: ScanEvent) => void) => {

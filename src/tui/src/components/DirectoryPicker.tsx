@@ -44,19 +44,16 @@ export function DirectoryPicker({ startPath, sendCommand, onEvent, onSelect, onC
 
   const visible = getVisibleNodes()
 
-  // Load initial directory
   useEffect(() => {
-    sendCommand({ cmd: "list-dirs", path: startPath })
+    setNodes([])
+    setCursorIndex(0)
     setLoading(true)
-  }, [startPath])
 
-  // Listen for dir listings
-  useEffect(() => {
-    return onEvent((event) => {
+    const unsubscribe = onEvent((event) => {
       if (event.event !== "dirs") return
       const dirEvent = event as { event: "dirs"; path: string; dirs: string[] }
 
-      if (dirEvent.path === startPath && nodes.length === 0) {
+      if (dirEvent.path === startPath) {
         // Initial load
         const children = dirEvent.dirs.map((name): DirNode => ({
           name,
@@ -94,7 +91,11 @@ export function DirectoryPicker({ startPath, sendCommand, onEvent, onSelect, onC
         return updated
       })
     })
-  }, [onEvent, startPath, nodes.length])
+    // Subscribe before requesting the first listing so fast backends cannot win the race.
+    sendCommand({ cmd: "list-dirs", path: startPath })
+
+    return unsubscribe
+  }, [onEvent, sendCommand, startPath])
 
   // Keyboard handler
   useEffect(() => {

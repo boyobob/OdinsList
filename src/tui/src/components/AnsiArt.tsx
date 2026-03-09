@@ -1,4 +1,5 @@
 import type { AnsiSegment } from "../utils/ansiArt"
+import { colors } from "../theme"
 
 interface AnsiArtProps {
   rows: AnsiSegment[][]
@@ -8,7 +9,7 @@ export function AnsiArt({ rows }: AnsiArtProps) {
   return (
     <box flexDirection="column" alignItems="center">
       {rows.map((row, y) => (
-        <text key={y}>
+        <text key={y} bg={colors.bg}>
           {row.map((segment, x) => {
             if (!segment.fg && !segment.bg) {
               return segment.text

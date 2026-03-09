@@ -110,6 +110,7 @@ export function App() {
   if (state === "home") {
     return (
       <HomeView
+        configReady={Boolean(config)}
         eyeLogoRows={EYE_LOGO_ROWS}
         textLogoRaw={TEXT_LOGO_RAW}
         configErrors={configErrors}
@@ -133,12 +134,22 @@ export function App() {
 
   // NewRunWizard manages its own layout (logo + wizard)
   if (state === "new_run_wizard") {
+    if (!config) {
+      return (
+        <box flexDirection="column" width="100%" height="100%">
+          <box flexGrow={1} justifyContent="center" alignItems="center">
+            <text fg={colors.dimmed}>Loading configuration...</text>
+          </box>
+        </box>
+      )
+    }
+
     return (
       <NewRunWizard
         mode={wizardMode}
         eyeLogoRows={EYE_LOGO_ROWS}
         textLogoRaw={TEXT_LOGO_RAW}
-        config={config!}
+        config={config}
         sendCommand={backend.sendCommand}
         onEvent={backend.onEvent}
         onStartRun={({ inputRootDir, outputTsvPath, runMode, singleBoxDir, resumeStats }) => {
