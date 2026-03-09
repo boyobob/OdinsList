@@ -1,0 +1,66 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target:
+          - linux-x64
+          - linux-arm64
+          - darwin-x64
+          - darwin-arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: cd src/tui && bun install --frozen-lockfile
+
+      - name: Build binary
+        run: cd src/tui && bun run build:${{ matrix.target }}
+
+      - name: Prepare backend source
+        run: |
+          rm -rf staging
+          mkdir -p staging/backend/src
+          cp -r src/odinslist staging/backend/src/odinslist
+          cp pyproject.toml staging/backend/pyproject.toml
+          echo "${GITHUB_REF_NAME}" > staging/backend/.odinslist-backend-version
+
+      - name: Package tarball
+        run: |
+          cp src/tui/dist/odinslist-${{ matrix.target }} staging/odinslist
+          chmod +x staging/odinslist
+          cd staging
+          tar -czf ../odinslist-${{ matrix.target }}.tar.gz odinslist backend/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: odinslist-${{ matrix.target }}
+          path: odinslist-${{ matrix.target }}.tar.gz
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: odinslist-*.tar.gz
+          generate_release_notes: true

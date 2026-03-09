@@ -1,0 +1,29 @@
+{
+  "name": "odinslist-tui",
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "start": "bun run src/index.tsx",
+    "dev": "bun --watch run src/index.tsx",
+    "test": "bun test",
+    "test:chafa": "bun run src/scripts/test-chafa.ts",
+    "embed-assets": "bun run scripts/embed-assets.ts",
+    "build": "bun run embed-assets && bun build --compile src/index.tsx --outfile dist/odinslist",
+    "build:linux-x64": "bun run embed-assets && bun build --compile --target=bun-linux-x64 src/index.tsx --outfile dist/odinslist-linux-x64",
+    "build:linux-arm64": "bun run embed-assets && bun build --compile --target=bun-linux-arm64 src/index.tsx --outfile dist/odinslist-linux-arm64",
+    "build:darwin-x64": "bun run embed-assets && bun build --compile --target=bun-darwin-x64 src/index.tsx --outfile dist/odinslist-darwin-x64",
+    "build:darwin-arm64": "bun run embed-assets && bun build --compile --target=bun-darwin-arm64 src/index.tsx --outfile dist/odinslist-darwin-arm64"
+  },
+  "dependencies": {
+    "@opentui/core": "latest",
+    "@opentui/react": "latest",
+    "pngjs": "^7.0.0",
+    "react": ">=19.0.0"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/pngjs": "^6.0.5",
+    "@types/react": ">=19.0.0",
+    "typescript": "latest"
+  }
+}

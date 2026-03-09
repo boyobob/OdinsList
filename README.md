@@ -1,257 +1,234 @@
 <p align="center">
-  <img src="assets/OdinsList_Logo.png" alt="OdinsList Logo" width="100%">
+  <img src="assets/images/logo.png" alt="OdinsList logo" width="100%" />
 </p>
-OdinsList is an automated comic cataloging tool that identifies issues directly from cover images using a vision-language model, then cross-references results with the Grand Comics Database and the ComicVine API to generate structured, high-confidence collection data with minimal manual entry.
 
-## Quick Start
+# OdinsList
 
-```bash
-# 1. Clone and install (into uv venv recommended)
-git clone https://github.com/yourusername/odinslist.git
-cd odinslist
-pip install -r requirements.txt
+OdinsList is an automated comic cataloging tool with an interactive TUI built on [OpenTUI](https://github.com/anthropics/opentui). It identifies issues directly from cover images using a vision-language model, then cross-references results with the Grand Comics Database and ComicVine to generate structured, high-confidence collection data with minimal manual entry.
 
-# 2. Configure (copy .env.example to .env and fill in your keys, endpoint, and model name)
-cp .env.example .env
-
-# 3. Start your VLM server (example with vLLM)
-vllm serve lhoang8500/Qwen3-VL-8B-Instruct-NVFP4 --port 8000
-
-# 4. Run on a single box
-python OdinsList.py --images /path/to/Comic_Photos --box Box_01
-
-# 5. Or process everything at once
-python OdinsList.py --images /path/to/Comic_Photos --batch
-```
-
-## Features
-
-- **Vision-based extraction**: Uses vision language models to read comic covers and extract metadata
-- **Multi-database verification**: Cross-references the Grand Comics Database (local SQLite) first, and then ComicVine API if a local match is not found (OdinsList can run with either data source independently, but optimal performance and accuracy are achieved when both are enabled. The local GCD SQLite database provides fast, offline lookups for the majority of matches, while the ComicVine API serves as a secondary validation layer, handling edge cases and confirming uncertain matches through visual comparison when GCD results are incomplete or ambiguous. FOR BEST RESULTS, ENABLE BOTH SOURCES)
-- **Visual cover matching**: Compares your cover photo against database covers (only if escalated to ComicVine API) to verify matches
-- **Confidence scoring**: Each result includes a confidence level (high/medium/low) based on match quality
-- **Batch processing**: Process entire collections organized in box folders
-- **Resume capability**: Skip already-processed high-confidence matches on re-runs (works in both single-box and batch mode)
-- **Price-based year estimation**: Uses cover price to narrow down publication year ranges in DB searches
-- **Multi-format support**: Accepts JPG, PNG, TIFF, WebP, and BMP images
+Version: `0.2.0`
 
 ## How It Works
 
-```
-┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
-│  Cover Photo    │────▶│  Vision Model   │────▶│  Extracted      │
-│  (image file)   │     │  (Qwen-VL)      │     │  Metadata       │
-└─────────────────┘     └─────────────────┘     └────────┬────────┘
-                                                         │
-                        ┌────────────────────────────────┼────────────────────────────────┐
-                        ▼                                ▼                                ▼
-               ┌─────────────────┐             ┌─────────────────┐             ┌─────────────────┐
-               │  GCD Database   │             │  ComicVine API  │             │  Visual Match   │
-               │  (Local SQLite) │             │  (Remote)       │             │  (Cover Compare)│
-               └────────┬────────┘             └────────┬────────┘             └────────┬────────┘
-                        │                               │                                │
-                        └───────────────────────────────┴────────────────────────────────┘
-                                                        │
-                                                        ▼
-                                               ┌─────────────────┐
-                                               │  Scored Results │
-                                               │  (TSV Output)   │
-                                               └─────────────────┘
-```
-
-1. **Vision Extraction**: A VLM analyzes the cover image and extracts visible text/metadata
-2. **Local Database Search**: Searches the Grand Comics Database (no API calls, instant)
-3. **API Verification**: Cross-references with ComicVine for additional data and cover images if a local match cannot be found in GCD DB
-4. **Visual Comparison**: Compares your photo against ComicVine covers to confirm matches
-5. **Scoring**: Combines all signals into a confidence score
+- **Vision-based extraction** — Uses a vision-language model to read comic covers and extract metadata
+- **Multi-database verification** — Checks the local GCD SQLite database first, then uses ComicVine when needed. OdinsList can run with either source independently, but best accuracy and coverage come from enabling both
+- **Visual cover matching** — Compares your cover image against database cover art during ComicVine validation for tougher matches
+- **Confidence scoring** — Each result is labeled `high`, `medium`, or `low` (see [Confidence Levels](#confidence-levels))
+- **Batch processing** — Processes full collections organized into box folders
+- **Resume capability** — Pause anytime and resume from any existing TSV
+- **Multi-format image support** — Supports `.jpg`, `.jpeg`, `.png`, `.tiff`, `.tif`, `.webp`, and `.bmp`
 
 ## Requirements
 
-- Python 3.10+
-- A vision-capable language model (see [Supported Models](#supported-models))
-- ComicVine API key (free at [comicvine.gamespot.com](https://comicvine.gamespot.com/api/))
-- Grand Comics Database dump (https://docs.comics.org/wiki/Main_Page#Database)
+- Linux or macOS (`x64` or `arm64`) for release binaries
+- Python `3.10+` (required for backend setup on first run)
+- A running OpenAI-compatible VLM API endpoint (for example: `http://127.0.0.1:8000/v1`)
+- ComicVine API key (free at [comicvine.gamespot.com/api](https://comicvine.gamespot.com/api/))
+- GCD SQLite `.db` file (free at [comics.org/download](https://www.comics.org/download/))
 
-## Setup
+> **For best results, enable both GCD and ComicVine.** The local GCD database provides fast offline lookups for the majority of matches, while ComicVine handles edge cases and confirms uncertain matches through visual cover comparison.
 
-### 1. Clone the repository
+## Quick Start
 
-```bash
-git clone https://github.com/yourusername/odinslist.git
-cd odinslist
-```
-
-### 2. Install dependencies
+1. Install OdinsList:
 
 ```bash
-pip install -r requirements.txt
+curl -fsSL https://raw.githubusercontent.com/boyobob/OdinsList/main/install.sh | bash
 ```
 
-### 3. Configure environment
+2. Start your VLM server (VLM Configuration Note: OdinsList sends each image as an independent, single-turn request with no conversation history. For best results, disable any multi-modal KV cache on your VLM server (e.g., --mm-processor-cache-gb 0 in vLLM) so each cover is evaluated fresh, cached multi-modal context can degrade accuracy.)
 
-Copy the example env file and fill in your values:
+
+3. Launch OdinsList:
 
 ```bash
-cp .env.example .env
+odinslist
 ```
 
-Edit `.env`:
-```
-COMICVINE_API_KEY=your-api-key-here
-VLM_BASE_URL=http://127.0.0.1:8000/v1
-VLM_MODEL=lhoang8500/Qwen3-VL-8B-Instruct-NVFP4
-```
+4. Complete first-run setup/installation, then open `Settings` to configure:
 
-Get a free ComicVine API key at [comicvine.gamespot.com/api](https://comicvine.gamespot.com/api/).
+   - VLM API endpoint (`vlm_base_url`) ex: (http://127.0.0.1:8000/v1)
+   - Model name (`vlm_model`) ex: (Qwen/Qwen3-VL-8B-Instruct-FP8)
+   - ComicVine API key
+   - GCD SQLite DB local path (If you place this in your images parent directory the program will autodetect it, you can place it anywhere so long as you define the path)
 
-### 4. Set up your vision model
+5. Select `Start New Run` and choose your parent image directory (example: `~/Desktop/Comic_Photos`). 
 
-OdinsList uses an OpenAI-compatible API endpoint. You can use:
+Note: For the program to recognize your image folders you must use the `Box_##` naming convention for folders in parent directory. The parent directory can be named anything.
 
-- **vLLM** with a vision model (recommended for local)
-- **Ollama** with LLaVA or similar
-- **LM Studio**
-- Any OpenAI-compatible vision API
-
-Example with vLLM:
-```bash
-vllm serve lhoang8500/Qwen3-VL-8B-Instruct-NVFP4 --port 8000
+```text
+/path/to/comics/
+├── Box_01/
+│   ├── 0001.jpg
+│   └── 0002.png
+├── Box_02/
+│   └── 0001.webp
+└── my_gcd.db
 ```
 
-### 5. Set up Grand Comics Database
+6. Choose mode:
 
-The local GCD DB significantly improves accuracy and speed and reduces API calls to ComicVine:
+   - `Single Box` — process one folder such as `~/Desktop/Comic_Photos/Box_01`
+   - `Batch` — process all valid box folders under the parent directory
 
-1. Download the latest SQLite dump from [comics.org/download](https://www.comics.org/download/)
-2. Place the `.db` file in your images directory (auto-detected) or pass `--gcd-db /path/to/file.db`
+7. Pick the output TSV path/name (default is pre-filled, but editable), review the pre-run summary, and start.
 
-## Usage
+8. During an active run:
+
+   | Key | Action |
+   |-----|--------|
+   | `P` | Pause the run |
+   | `Enter` | Resume from pause |
+   | `B` | Toggle browse mode to review results as they arrive |
+   | `Esc` `Esc` | Exit to main menu |
+
+   > You can safely exit the program at any time — your progress is saved. To pick up where you left off, select `Resume Run` from the main menu and select which TSV you would like to resume from.
 
 ### Directory Structure
 
-Organize your comic photos in box folders:
+Organize your comic photos in box folders. Folders must use the `Box_XX` naming convention. The parent directory can be named anything.
 
-```
-Comic_Photos/
+```text
+/path/to/comics/
 ├── Box_01/
-│   ├── IMG_0001.jpg
-│   ├── IMG_0002.png
-│   └── ...
+│   ├── 0001.jpg
+│   └── 0002.png
 ├── Box_02/
-│   └── ...
-└── Box_03/
-    └── ...
+│   └── 0001.webp
+└── my_gcd.db
 ```
 
-### Single Box Mode
+## Headless CLI Usage/Reference
+
+Use `--box` or `--batch` to run without the TUI.
+
+### Batch Scan All Boxes
 
 ```bash
-python OdinsList.py --images /path/to/Comic_Photos --box Box_01
+odinslist \
+  --images /path/to/comics \
+  --batch \
+  --out /path/to/comics/All_Boxes.tsv \
+  --vlm-url http://127.0.0.1:8000/v1 \
+  --vlm-model Qwen2.5-VL-32B
 ```
 
-Output: `Comic_Photos/Box_01/Box_01.tsv`
-
-### Batch Mode
-
-Process all boxes at once:
+### Single Box Scan
 
 ```bash
-python OdinsList.py --images /path/to/Comic_Photos --batch
+odinslist \
+  --images /path/to/comics \
+  --box Box_01 \
+  --out /path/to/comics/Box_01.tsv \
+  --vlm-url http://127.0.0.1:8000/v1 \
+  --vlm-model Qwen2.5-VL-32B
 ```
 
-Output: `Comic_Photos/odinslist_output.tsv`
-
-### Resume After Interruption
-
-If a run is interrupted, re-run with `--resume` to skip high-confidence matches:
+### Resume Previous TSV
 
 ```bash
-python OdinsList.py --images /path/to/Comic_Photos --batch --resume
+odinslist \
+  --images /path/to/comics \
+  --batch \
+  --out /path/to/comics/All_Boxes.tsv \
+  --resume
 ```
 
 ### CLI Reference
 
 | Flag | Description | Default |
 |------|-------------|---------|
-| `--images` | Base(parent) directory with Box_XX folders | required |
-| `--box` | Process a single box | (mutually exclusive with --batch) |
-| `--batch` | Process all Box_XX folders | False |
+| `--images` | Parent directory with `Box_XX` folders | *required* |
+| `--box` | Process a single box | *(mutually exclusive with --batch)* |
+| `--batch` | Process all `Box_XX` folders | `false` |
 | `--out` | Output TSV path | auto-generated in images dir |
-| `--resume` | Skip high-confidence matches from previous runs | False |
+| `--resume` | Skip high-confidence matches from previous runs | `false` |
 | `--gcd-db` | Path to GCD SQLite database | auto-detect `*.db` in images dir |
-| `--vlm-url` | VLM API base URL | env `VLM_BASE_URL` or `http://127.0.0.1:8000/v1` |
-| `--vlm-model` | VLM model name | env `VLM_MODEL` |
-| `--no-gcd` | Disable local GCD search | False |
-| `--no-comicvine` | Disable ComicVine API (GCD-only mode) | False |
-| `--no-visual` | Disable cover image comparison | False |
+| `--vlm-url` | VLM API base URL | `http://127.0.0.1:8000/v1` |
+| `--vlm-model` | VLM model name | from config |
+| `--no-gcd` | Disable GCD lookups | `false` |
+| `--no-comicvine` | Disable ComicVine lookups | `false` |
+| `--ipc` | Run JSONL IPC mode (used by the TUI backend) | `false` |
 
-Precedence: CLI flag > environment variable > default.
+If `--gcd-db` is omitted, OdinsList auto-detects the newest `.db` file in the images root when possible.
 
-## Output Format
+## Configuration File
 
-Results are saved as tab-separated values (TSV):
+OdinsList stores config at `~/.config/odinslist/config.toml`:
+
+```toml
+[paths]
+input_root_dir = "/path/to/comics"
+output_tsv_path = "/path/to/comics/All_Boxes.tsv"
+gcd_db = "/path/to/gcd.db"
+
+[vlm]
+base_url = "http://127.0.0.1:8000/v1"
+model = "Qwen/Qwen3-VL-8B-Instruct-FP8" (Note: Use the model's exact full name identifier) 
+
+[comicvine]
+api_key = "your_ComicVine_API_key"
+
+[features]
+gcd_enabled = true
+comicvine_enabled = true
+
+[run]
+run_mode = "batch"
+single_box_dir = ""
+```
+
+## Output
+
+Results are written as TSV with columns:
 
 | Column | Description |
 |--------|-------------|
-| title | Comic series title |
-| issue_number | Issue number (e.g., `142`) |
-| month | Cover month as 3-letter abbreviation (e.g., `MAR`) |
-| year | Publication year |
-| publisher | Publisher name (normalized) |
-| box | Box folder name |
-| filename | Original image filename |
-| notes | Empty — reserved for your manual annotations |
-| confidence | Match confidence: high, medium, or low |
+| `title` | Comic series title |
+| `issue_number` | Issue number (e.g., `142`) |
+| `month` | Cover month as 3-letter abbreviation (e.g., `MAR`) |
+| `year` | Publication year |
+| `publisher` | Publisher name (normalized) |
+| `box` | Box folder name |
+| `filename` | Original image filename |
+| `notes` | Empty — reserved for your manual annotations |
+| `confidence` | Match confidence: `high`, `medium`, or `low` |
+
+When rerunning with the same output TSV, rows are updated by `(box, filename)` so scans can be resumed without duplicate lines.
 
 ### Confidence Levels
 
-- **high** (score > 40): Strong match, likely correct
-- **medium** (score 20-40): Probable match, worth verifying
-- **low** (score < 20): Uncertain, manual review recommended
+| Level | Score | Meaning |
+|-------|-------|---------|
+| **high** | > 40 | Strong match, likely correct |
+| **medium** | 20–40 | Probable match missing signals, recommend verifying |
+| **low** | < 20 | Uncertain, manual review recommended |
 
 ## Supported Models
 
-Any vision-capable model served via OpenAI-compatible API:
+Any vision-capable model served via an OpenAI-compatible API:
 
 | Model | Notes |
 |-------|-------|
-| Qwen2-VL / Qwen3-VL | Tested and recommended, excellent OCR |
+| Qwen2-VL / Qwen3-VL / Qwen3.5| Tested and recommended, excellent OCR |
 | LLaVA 1.6+ | Good general performance |
 | InternVL2 | Strong multilingual support |
 | Pixtral | Mistral's vision model |
 
-Set the model via `--vlm-model` flag or `VLM_MODEL` in your `.env` file.
+Set the model via `--vlm-model` flag or `vlm.model` in your config file or settings menu.
 
-## Accuracy
-
-In testing on a collection of ~3,000 comics:
-- **~94% accuracy** with high-confidence matches
-
-### Tips for Better Results
+## Tips for Better Results
 
 - Take photos in good lighting with minimal glare
 - Capture the full cover including edges
 - Avoid extreme angles
 - Higher resolution photos improve OCR accuracy
+- When all signals (title, issue#, month, price, publisher) are visible on the cover the program is most accurate. Comics with no signals will likely fail.
 
 ## Data Sources
 
-### Grand Comics Database (GCD)
-
-- **Website**: [comics.org](https://www.comics.org/)
-- **License**: [CC BY 3.0](https://creativecommons.org/licenses/by/3.0/)
-- **Coverage**: Comprehensive database of published comics worldwide
-
-### ComicVine
-
-- **Website**: [comicvine.gamespot.com](https://comicvine.gamespot.com/)
-- **API**: Free tier allows 200 requests/hour
-- **Coverage**: Extensive US comics database with cover images
-
-## Roadmap
-
-- Interactive TUI, with setup wizard, and live ANSI image previews coming soon!
-  <img width="734" height="676" alt="odinslist_tui" src="https://github.com/user-attachments/assets/37e10d54-313c-4944-8c7f-56256fe3f4d1" />
+- **Grand Comics Database (GCD)** — [comics.org](https://www.comics.org/) — [CC BY 3.0](https://creativecommons.org/licenses/by/3.0/)
+- **ComicVine** — [comicvine.gamespot.com](https://comicvine.gamespot.com/) — Free API tier (200 requests/hour)
 
 ## Contributing
 
@@ -261,10 +238,12 @@ Contributions welcome! Areas where help is needed:
 - Improving title matching algorithms
 - Adding support for non-US and oddball comics
 - Documentation and examples
+- Integrating a small bundled OCR model
+- Support for variant classification (Newstand etc.) 
 
 ## License
 
-[MIT License](LICENSE)
+MIT. See [LICENSE](LICENSE).
 
 ## Acknowledgments
 
