@@ -4,9 +4,9 @@
 
 # OdinsList
 
-OdinsList is an automated comic cataloging tool with an interactive TUI built on [OpenTUI](https://github.com/anthropics/opentui). It identifies issues directly from cover images using a vision-language model, then cross-references results with the Grand Comics Database and ComicVine to generate structured, high-confidence collection data with minimal manual entry.
+OdinsList is an automated comic cataloging tool with an interactive TUI built on [OpenTUI](https://github.com/anthropics/opentui). (TUI screenshots available in /assets/images) It identifies issues directly from cover images using a vision-language model, then cross-references results with the Grand Comics Database and ComicVine to generate structured, high-confidence collection data with minimal manual entry.
 
-Version: `0.2.3`
+Version: `0.2.4`
 
 ## How It Works
 
@@ -45,12 +45,14 @@ curl -fsSL https://raw.githubusercontent.com/boyobob/OdinsList/main/install.sh |
 odinslist
 ```
 
-4. Complete first-run setup/installation, then open `Settings` to configure:
+4. On first launch, complete backend setup if prompted, then open `Settings` to configure:
+
+   A fresh install starts with blank settings. The home screen will show red warnings until you fill these in.
 
    - VLM API endpoint (`vlm_base_url`) ex: (http://127.0.0.1:8000/v1)
    - Model name (`vlm_model`) ex: (Qwen/Qwen3-VL-8B-Instruct-FP8)
    - ComicVine API key
-   - GCD SQLite DB local path (If you place this in your images parent directory the program will autodetect it, you can place it anywhere so long as you define the path)
+   - GCD SQLite DB local path (If you place this in your images parent directory the program will autodetect it, you can place it anywhere so long as you define the path in settings/config)
 
 5. Select `Start New Run` and choose your parent image directory (example: `~/Desktop/Comic_Photos`). 
 
@@ -110,7 +112,7 @@ odinslist \
   --batch \
   --out /path/to/comics/All_Boxes.tsv \
   --vlm-url http://127.0.0.1:8000/v1 \
-  --vlm-model Qwen2.5-VL-32B
+  --vlm-model Qwen/Qwen3-VL-8B-Instruct-FP8
 ```
 
 ### Single Box Scan
@@ -121,7 +123,7 @@ odinslist \
   --box Box_01 \
   --out /path/to/comics/Box_01.tsv \
   --vlm-url http://127.0.0.1:8000/v1 \
-  --vlm-model Qwen2.5-VL-32B
+  --vlm-model Qwen/Qwen3-VL-8B-Instruct-FP8
 ```
 
 ### Resume Previous TSV
@@ -144,7 +146,7 @@ odinslist \
 | `--out` | Output TSV path | auto-generated in images dir |
 | `--resume` | Skip high-confidence matches from previous runs | `false` |
 | `--gcd-db` | Path to GCD SQLite database | auto-detect `*.db` in images dir |
-| `--vlm-url` | VLM API base URL | `http://127.0.0.1:8000/v1` |
+| `--vlm-url` | VLM API base URL | none (`configure in Settings/config.toml` or pass explicitly) |
 | `--vlm-model` | VLM model name | from config |
 | `--no-gcd` | Disable GCD lookups | `false` |
 | `--no-comicvine` | Disable ComicVine lookups | `false` |
@@ -163,8 +165,8 @@ output_tsv_path = "/path/to/comics/All_Boxes.tsv"
 gcd_db = "/path/to/gcd.db"
 
 [vlm]
-base_url = "http://127.0.0.1:8000/v1"
-model = "Qwen/Qwen3-VL-8B-Instruct-FP8" (Note: Use the model's exact full name identifier) 
+base_url = "http://127.0.0.1:8000/v1" # example only; blank until configured
+model = "Qwen/Qwen3-VL-8B-Instruct-FP8" (Note: Use the model's exact full name identifier being pushed by server) 
 
 [comicvine]
 api_key = "your_ComicVine_API_key"
@@ -200,9 +202,9 @@ When rerunning with the same output TSV, rows are updated by `(box, filename)` s
 
 | Level | Score | Meaning |
 |-------|-------|---------|
-| **high** | > 40 | Strong match, likely correct |
-| **medium** | 20–40 | Probable match missing signals, recommend verifying |
-| **low** | < 20 | Uncertain, manual review recommended |
+| **high** | >= 40 | Strong match, likely correct |
+| **medium** | 21-39 | Probable match missing signals, recommend verifying |
+| **low** | <= 20 | Uncertain, manual review recommended |
 
 ## Supported Models
 
@@ -210,10 +212,10 @@ Any vision-capable model served via an OpenAI-compatible API:
 
 | Model | Notes |
 |-------|-------|
-| Qwen2-VL / Qwen3-VL / Qwen3.5| Tested and recommended, excellent OCR |
-| LLaVA 1.6+ | Good general performance |
-| InternVL2 | Strong multilingual support |
-| Pixtral | Mistral's vision model |
+| *Qwen3-VL-8B-Instruct | (Recommended) Tested with vLLM backend in FP8 and NVFP4. Best results, 97% High confidence matches over a 2,992 comic book dataset with GCD and ComicVine enabled |
+| Qwen3-VL-2B-Instruct | Similar results to 8B with degradation, tested with LMStudio/llama.cpp backend with Q4_K_M GGUF quant. Non-GGUF may perform better in vLLM |
+| LFM2.5-VL-1.6B | Tested with LMStudio/llama.cpp backend with Q4_K_M GGUF quant. Suprisingly good results. |
+| Qwen3.5-0.8B/2B/4B | Promising, further testing needed. Mixed results. |
 
 Set the model via `--vlm-model` flag or `vlm.model` in your config file or settings menu.
 
@@ -224,6 +226,7 @@ Set the model via `--vlm-model` flag or `vlm.model` in your config file or setti
 - Avoid extreme angles
 - Higher resolution photos improve OCR accuracy
 - When all signals (title, issue#, month, price, publisher) are visible on the cover the program is most accurate. Comics with no signals will likely fail.
+- Choose a model with strict instruction following like Qwen3-VL-Instruct
 
 ## Data Sources
 
@@ -234,11 +237,11 @@ Set the model via `--vlm-model` flag or `vlm.model` in your config file or setti
 
 Contributions welcome! Areas where help is needed:
 
-- Testing with different vision models
+- Testing with different vision models and model prompting/schema (located in vlm.py)
 - Improving title matching algorithms
 - Adding support for non-US and oddball comics
 - Documentation and examples
-- Integrating a small bundled OCR model
+- Integrating a small bundled OCR/VLM model while maintaining accuracy
 - Support for variant classification (Newstand etc.) 
 
 ## License

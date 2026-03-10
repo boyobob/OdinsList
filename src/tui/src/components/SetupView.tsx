@@ -25,7 +25,7 @@ const steps: SetupStep[] = [
     key: "vlm_base_url",
     question: "What is your VLM API URL?",
     hint: "(Example: http://127.0.0.1:8000/v1 for local vLLM)",
-    defaultValue: "http://127.0.0.1:8000/v1",
+    defaultValue: "",
   },
   {
     key: "vlm_model",

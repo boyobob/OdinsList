@@ -368,7 +368,7 @@ async def scan_single_image(
 
             # GCD Strategy 2: Broad search without title
             best_gcd_score = max((s for _, s in all_candidates.values()), default=0)
-            if best_gcd_score <= 40:
+            if best_gcd_score < 40:
                 yield GCDSearching(strategy=2, title="", issue=issue_num)
                 gcd_results_broad = search_gcd(
                     "", issue_num, publisher, year_range, cover_month,
@@ -386,7 +386,7 @@ async def scan_single_image(
 
             # GCD Strategy 3: Title-focused (no issue# constraint)
             best_gcd_score = max((s for _, s in all_candidates.values()), default=0)
-            if best_gcd_score <= 40 and search_title:
+            if best_gcd_score < 40 and search_title:
                 yield GCDSearching(strategy=3, title=search_title, issue="")
                 gcd_results_title = search_gcd_by_title(
                     search_title, publisher, year_range,
@@ -405,7 +405,7 @@ async def scan_single_image(
         # === COMICVINE SEARCH ===
         best_score_so_far = max((s for _, s in all_candidates.values()), default=0)
 
-        if cv_client and best_score_so_far <= 40:
+        if cv_client and best_score_so_far < 40:
             # Strategy 1: Volume-based search
             yield ComicVineSearching(stage="volumes")
             volume_candidates = cv_client.fetch_volume_candidates(search_title, publisher)
@@ -467,7 +467,7 @@ async def scan_single_image(
             # Strategy 2: Issue + Month search
             if not best_detail and issue_num and cover_month:
                 best_score_so_far = max((s for _, s in all_candidates.values()), default=0)
-                if best_score_so_far <= 40:
+                if best_score_so_far < 40:
                     yield ComicVineSearching(stage="search")
                     candidates_2 = cv_client.search_issues_by_number_and_month(
                         issue_num, cover_month, year_likelihood, search_title, publisher
@@ -506,7 +506,7 @@ async def scan_single_image(
             # Strategy 3: Direct issue search
             if not best_detail and issue_num:
                 best_score_so_far = max((s for _, s in all_candidates.values()), default=0)
-                if best_score_so_far <= 40:
+                if best_score_so_far < 40:
                     yield ComicVineSearching(stage="direct")
                     candidates_3 = cv_client.search_issues_directly(search_title, issue_num, publisher)
                     for cand in candidates_3:
@@ -566,7 +566,7 @@ async def scan_single_image(
             title, issue_num, cover_month, publisher, year
         )
 
-        confidence = "high" if best_score > 40 else ("medium" if best_score > 20 else "low")
+        confidence = "high" if best_score >= 40 else ("medium" if best_score > 20 else "low")
 
         result = ComicResult(
             title=title,

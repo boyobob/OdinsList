@@ -23,8 +23,6 @@ export function HomeView({ configReady, eyeLogoRows, textLogoRaw, configErrors, 
   const { width, height } = useTerminalDimensions()
   const [showHelp, setShowHelp] = useState(false)
 
-  const hasErrors = configErrors.length > 0
-
   const EYE_LOGO_WIDTH = Math.max(
     ...eyeLogoRows.map(row => row.reduce((w, seg) => w + seg.text.length, 0))
   )
@@ -33,7 +31,7 @@ export function HomeView({ configReady, eyeLogoRows, textLogoRaw, configErrors, 
   const compact = height < 25
 
   const items: MenuItem[] = [
-    { label: !configReady ? "Start New Run (loading...)" : hasErrors ? "Start New Run (blocked)" : "Start New Run", value: "new_run" },
+    { label: configReady ? "Start New Run" : "Start New Run (loading...)", value: "new_run" },
     { label: configReady ? "Resume Run" : "Resume Run (loading...)", value: "resume" },
     { label: configReady ? "Settings/Config" : "Settings/Config (loading...)", value: "settings" },
     { label: "Quit", value: "quit" },
@@ -42,7 +40,7 @@ export function HomeView({ configReady, eyeLogoRows, textLogoRaw, configErrors, 
   const handleSelect = (item: MenuItem) => {
     switch (item.value) {
       case "new_run":
-        if (configReady && !hasErrors) onStartNewRun()
+        if (configReady) onStartNewRun()
         break
       case "resume":
         if (configReady) onResumeRun()
@@ -74,10 +72,10 @@ export function HomeView({ configReady, eyeLogoRows, textLogoRaw, configErrors, 
         {(configErrors.length > 0 || configWarnings.length > 0) && (
           <box flexDirection="column" marginTop={1} paddingX={2}>
             {configErrors.map((err, i) => (
-              <text key={`err-${i}`} fg={colors.red}>  X {err}</text>
+              <text key={`err-${i}`} fg={colors.red}>  ! {err}</text>
             ))}
             {configWarnings.map((warn, i) => (
-              <text key={`warn-${i}`} fg={colors.yellow}>  ! {warn}</text>
+              <text key={`warn-${i}`} fg={colors.red}>  ! {warn}</text>
             ))}
           </box>
         )}

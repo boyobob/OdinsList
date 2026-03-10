@@ -26,7 +26,7 @@ class OdinsListConfig:
     gcd_db_path: str = ""
 
     # VLM
-    vlm_base_url: str = "http://127.0.0.1:8000/v1"
+    vlm_base_url: str = ""
     vlm_model: str = ""
 
     # ComicVine
