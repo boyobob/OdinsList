@@ -6,7 +6,7 @@
 
 OdinsList is an automated comic cataloging tool with an interactive TUI built on [OpenTUI](https://github.com/anthropics/opentui). (TUI screenshots available in /assets/images) It identifies issues directly from cover images using a vision-language model, then cross-references results with the Grand Comics Database and ComicVine to generate structured, high-confidence collection data with minimal manual entry.
 
-Version: `0.2.4`
+Version: `0.2.5`
 
 ## How It Works
 
@@ -25,6 +25,7 @@ Version: `0.2.4`
 - A running OpenAI-compatible VLM API endpoint (for example: `http://127.0.0.1:8000/v1`)
 - ComicVine API key (free at [comicvine.gamespot.com/api](https://comicvine.gamespot.com/api/))
 - GCD SQLite `.db` file (free at [comics.org/download](https://www.comics.org/download/))
+- `chafa` (*optional*, for higher-fidelity ANSI image previews in the TUI; OdinsList includes a built-in preview fallback. [chafa](https://github.com/hpjansson/chafa) )
 
 > **For best results, enable both GCD and ComicVine.** The local GCD database provides fast offline lookups for the majority of matches, while ComicVine handles edge cases and confirms uncertain matches through visual cover comparison.
 

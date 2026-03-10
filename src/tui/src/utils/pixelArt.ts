@@ -1,5 +1,7 @@
 import { PNG } from "pngjs";
 import { detectChafa, renderWithChafa } from "./chafa";
+import { existsSync } from "fs";
+import { VENV_PYTHON } from "../setup";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -19,7 +21,6 @@ interface ConvertOptions {
   maxWidth?: number;
   maxHeight?: number; // in terminal rows (each = 2 pixel rows)
   alphaThreshold?: number; // alpha below this = transparent (0-255, default 128)
-  contrastStretch?: boolean; // remap luma range to fill 30-230 (default true)
 }
 
 // ── Constants ──────────────────────────────────────────────────────────────────
@@ -31,16 +32,9 @@ const SPACE = " ";
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
-/** ITU-R 601-2 luma: convert RGB to greyscale brightness. */
-function toLuma(r: number, g: number, b: number): number {
-  return Math.round(0.299 * r + 0.587 * g + 0.114 * b);
-}
-
-/** Format a greyscale value as an ANSI-compatible hex colour string. */
-function greyHex(luma: number): string {
-  const clamped = Math.max(0, Math.min(255, luma));
-  const h = clamped.toString(16).padStart(2, "0");
-  return `#${h}${h}${h}`;
+function rgbHex(r: number, g: number, b: number): string {
+  const hex = (n: number) => Math.max(0, Math.min(255, n)).toString(16).padStart(2, "0");
+  return `#${hex(r)}${hex(g)}${hex(b)}`;
 }
 
 // ── Resize (nearest-neighbour) ─────────────────────────────────────────────────
@@ -50,6 +44,8 @@ interface RawImage {
   width: number;
   height: number;
 }
+
+const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 
 function nearestNeighbourResize(
   src: RawImage,
@@ -76,38 +72,6 @@ function nearestNeighbourResize(
   return { data: dst, width: dstWidth, height: dstHeight };
 }
 
-// ── Contrast stretching ────────────────────────────────────────────────────────
-
-/** Find min/max luma of opaque pixels and build a remap function. */
-function buildContrastMap(
-  img: RawImage,
-  alphaThreshold: number,
-): (luma: number) => number {
-  let minLuma = 255;
-  let maxLuma = 0;
-
-  for (let i = 0; i < img.data.length; i += 4) {
-    if (img.data[i + 3] < alphaThreshold) continue;
-    const l = toLuma(img.data[i], img.data[i + 1], img.data[i + 2]);
-    if (l < minLuma) minLuma = l;
-    if (l > maxLuma) maxLuma = l;
-  }
-
-  const range = maxLuma - minLuma;
-  if (range < 10) {
-    // Not enough range to stretch meaningfully
-    return (luma: number) => luma;
-  }
-
-  // Remap [minLuma, maxLuma] → [30, 230] to keep visibility on dark backgrounds
-  const outMin = 30;
-  const outMax = 230;
-  return (luma: number) => {
-    const normalized = (luma - minLuma) / range;
-    return Math.round(outMin + normalized * (outMax - outMin));
-  };
-}
-
 // ── Core converter ─────────────────────────────────────────────────────────────
 
 export function convertPngToHalfBlock(
@@ -125,7 +89,6 @@ export function convertPngToHalfBlock(
   const maxWidth = options?.maxWidth;
   const maxHeight = options?.maxHeight;
   const alphaThreshold = options?.alphaThreshold ?? 128;
-  const shouldStretchContrast = options?.contrastStretch !== false; // default true
 
   // ── Compute target dimensions ──────────────────────────────────────────────
   let targetWidth = img.width;
@@ -153,11 +116,6 @@ export function convertPngToHalfBlock(
     img = nearestNeighbourResize(img, targetWidth, targetHeight);
   }
 
-  // Build contrast map after resize (operates on final pixel data)
-  const remapLuma = shouldStretchContrast
-    ? buildContrastMap(img, alphaThreshold)
-    : (l: number) => l;
-
   // ── Convert pixel pairs into half-block cells ──────────────────────────────
   const termRows = img.height / 2;
   const rows: HalfBlockCell[][] = [];
@@ -181,24 +139,23 @@ export function convertPngToHalfBlock(
       const botB = img.data[botIdx + 2];
       const botA = img.data[botIdx + 3];
       const botTransparent = botA < alphaThreshold;
-
-      const topLuma = remapLuma(toLuma(topR, topG, topB));
-      const botLuma = remapLuma(toLuma(botR, botG, botB));
+      const topColor = rgbHex(topR, topG, topB);
+      const bottomColor = rgbHex(botR, botG, botB);
 
       if (topTransparent && botTransparent) {
         cells.push({ char: SPACE, fg: null, bg: null });
       } else if (topTransparent) {
-        cells.push({ char: LOWER_HALF, fg: greyHex(botLuma), bg: null });
+        cells.push({ char: LOWER_HALF, fg: bottomColor, bg: null });
       } else if (botTransparent) {
-        cells.push({ char: UPPER_HALF, fg: greyHex(topLuma), bg: null });
+        cells.push({ char: UPPER_HALF, fg: topColor, bg: null });
       } else {
-        if (topLuma === botLuma) {
-          cells.push({ char: FULL_BLOCK, fg: greyHex(topLuma), bg: null });
+        if (topColor === bottomColor) {
+          cells.push({ char: FULL_BLOCK, fg: topColor, bg: null });
         } else {
           cells.push({
             char: UPPER_HALF,
-            fg: greyHex(topLuma),
-            bg: greyHex(botLuma),
+            fg: topColor,
+            bg: bottomColor,
           });
         }
       }
@@ -216,13 +173,54 @@ export function convertPngToHalfBlock(
 
 // ── Async convenience loader ───────────────────────────────────────────────────
 
+function isPngBuffer(buffer: Buffer): boolean {
+  return buffer.length >= PNG_SIGNATURE.length
+    && buffer.subarray(0, PNG_SIGNATURE.length).equals(PNG_SIGNATURE);
+}
+
+async function decodeImageWithPython(filePath: string): Promise<Buffer> {
+  const pythonBin = existsSync(VENV_PYTHON) ? VENV_PYTHON : "python3";
+  const script = [
+    "import io, sys",
+    "from PIL import Image, ImageOps",
+    "img = Image.open(sys.argv[1])",
+    "img = ImageOps.exif_transpose(img)",
+    "img = img.convert('RGBA')",
+    "buf = io.BytesIO()",
+    "img.save(buf, format='PNG')",
+    "sys.stdout.buffer.write(buf.getvalue())",
+  ].join("; ");
+
+  const proc = Bun.spawn([pythonBin, "-c", script, filePath], {
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+
+  const [exitCode, stdout, stderr] = await Promise.all([
+    proc.exited,
+    new Response(proc.stdout).arrayBuffer(),
+    new Response(proc.stderr).text(),
+  ]);
+
+  if (exitCode !== 0) {
+    const details = stderr.trim() || "unknown image decode failure";
+    throw new Error(`preview decode failed: ${details}`);
+  }
+
+  return Buffer.from(stdout);
+}
+
 export async function loadArtAsync(
   filePath: string,
   options?: ConvertOptions,
 ): Promise<HalfBlockArt> {
   const file = Bun.file(filePath);
   const arrayBuffer = await file.arrayBuffer();
-  const buffer = Buffer.from(arrayBuffer);
+  const sourceBuffer = Buffer.from(arrayBuffer);
+  const buffer = isPngBuffer(sourceBuffer)
+    ? sourceBuffer
+    : await decodeImageWithPython(filePath);
+
   return convertPngToHalfBlock(buffer, options);
 }
 

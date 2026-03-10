@@ -5,6 +5,12 @@ import type { HalfBlockArt, HalfBlockCell } from "./pixelArt";
 let chafaAvailable: boolean | null = null;
 
 export async function detectChafa(): Promise<boolean> {
+  const disableChafa = (process.env.ODINSLIST_DISABLE_CHAFA ?? "").trim().toLowerCase();
+  if (disableChafa === "1" || disableChafa === "true" || disableChafa === "yes") {
+    chafaAvailable = false;
+    return false;
+  }
+
   if (chafaAvailable !== null) return chafaAvailable;
 
   try {
